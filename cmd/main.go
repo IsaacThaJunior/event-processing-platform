@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/repository"
+	"github.com/isaacthajunior/mid-prod/internal/worker"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -35,6 +36,14 @@ func main() {
 
 	redisClient := repository.NewRedisClient()
 	defer redisClient.Close()
+	queue := repository.NewRedisQueue(redisClient, "events_queue")
+
+	queue.Enqueue("task-1")
+	queue.Enqueue("task-2")
+	
+	pool := worker.NewWorkerPool(queue, 3)
+	pool.Start()
+	defer pool.Stop()
 
 	log.Println("Connected to Postgres successfully")
 

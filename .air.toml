@@ -1,0 +1,12 @@
+# .air.toml
+[build]
+  bin = "app"
+  cmd = "go build -o ./app ./cmd"
+  include_ext = ["go", "tmpl", "html"]
+  exclude_dir = ["vendor", "tmp"]
+
+[log]
+  time = true
+
+[color]
+  main = "yellow"

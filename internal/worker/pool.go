@@ -1,0 +1,61 @@
+package worker
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/isaacthajunior/mid-prod/internal/domain"
+)
+
+type WorkerPool struct {
+	queue   domain.Queue
+	workers int
+	ctx     context.Context
+	cancel  context.CancelFunc
+}
+
+func NewWorkerPool(queue domain.Queue, workerCount int) *WorkerPool {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &WorkerPool{
+		queue:   queue,
+		workers: workerCount,
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+}
+
+func (p *WorkerPool) Start() {
+	for i := 0; i < p.workers; i++ {
+		go p.worker(i)
+	}
+}
+
+func (p *WorkerPool) worker(id int) {
+	fmt.Printf("Worker %d started\n", id)
+	for {
+		select {
+		case <-p.ctx.Done():
+			fmt.Printf("Worker %d stopping\n", id)
+			return
+		default:
+			taskID, err := p.queue.Dequeue()
+			if err != nil {
+				fmt.Println("Dequeue error:", err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			if taskID == "" {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+
+			// TODO: process task
+			fmt.Printf("Worker %d processing task: %s\n", id, taskID)
+		}
+	}
+}
+
+func (p *WorkerPool) Stop() {
+	p.cancel()
+}
