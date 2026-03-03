@@ -6,19 +6,22 @@ import (
 	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/domain"
+	"github.com/isaacthajunior/mid-prod/internal/repository"
 )
 
 type WorkerPool struct {
 	queue   domain.Queue
+	repo    repository.EventRepository
 	workers int
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
 
-func NewWorkerPool(queue domain.Queue, workerCount int) *WorkerPool {
+func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCount int) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerPool{
 		queue:   queue,
+		repo:    repo,
 		workers: workerCount,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -52,6 +55,11 @@ func (p *WorkerPool) worker(id int) {
 
 			// TODO: process task
 			fmt.Printf("Worker %d processing task: %s\n", id, taskID)
+			ctx := context.Background()
+			err = p.repo.SaveProcessedEvent(ctx, taskID)
+			if err != nil {
+				fmt.Printf("Worker %d failed to save event: %v\n", id, err)
+			}
 		}
 	}
 }

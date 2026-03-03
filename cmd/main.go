@@ -1,49 +1,37 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"time"
 
+	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/worker"
-	"github.com/jackc/pgx/v5"
 )
 
 func main() {
-	dbHost := os.Getenv("DB_HOST")
-	dbPort := os.Getenv("DB_PORT")
-	dbUser := os.Getenv("DB_USER")
-	dbPassword := os.Getenv("DB_PASSWORD")
-	dbName := os.Getenv("DB_NAME")
-
-	connStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s",
-		dbUser, dbPassword, dbHost, dbPort, dbName,
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	conn, err := pgx.Connect(ctx, connStr)
+	pool, err := database.NewPool()
 	if err != nil {
-		log.Fatalf("Unable to connect to database: %v\n", err)
+		log.Fatalf("failed to connect to db: %v", err)
 	}
-	defer conn.Close(context.Background())
+	defer pool.Close()
 
+	// ✅ Initialize SQLC queries
+	queries := database.New(pool)
+
+	// ✅ Create repository
+	eventRepo := repository.NewEventRepository(queries)
+
+	// --- We using Redis queue ---
 	redisClient := repository.NewRedisClient()
 	defer redisClient.Close()
+
 	queue := repository.NewRedisQueue(redisClient, "events_queue")
 
-	queue.Enqueue("task-1")
-	queue.Enqueue("task-2")
-	
-	pool := worker.NewWorkerPool(queue, 3)
-	pool.Start()
-	defer pool.Stop()
+	// --- Worker pool ---
+	workerPool := worker.NewWorkerPool(queue, eventRepo, 3)
+	workerPool.Start()
+	defer workerPool.Stop()
 
 	log.Println("Connected to Postgres successfully")
 

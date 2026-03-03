@@ -9,7 +9,7 @@ RUN apk add --no-cache git bash
 # Add Go bin to PATH
 ENV PATH=$PATH:/go/bin
 
-# Install Air (v2 stable)
+# Install Air
 RUN go install github.com/air-verse/air@latest
 
 # Copy go.mod and go.sum, download deps

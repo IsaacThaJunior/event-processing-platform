@@ -1,0 +1,10 @@
+version: "2"
+sql:
+  - engine: "postgresql" # PostgreSQL DB
+    schema: "sql/schema" # Folder containing SQL migration/schema files
+    queries: "sql/queries" # Folder containing SQL query files
+    gen:
+      go:
+        package: "database" # Go package name for generated code
+        out: "internal/database" # Where to put generated Go code
+        sql_package: "pgx/v5" # SQL driver (pgx recommended)
