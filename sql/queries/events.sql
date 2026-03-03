@@ -13,13 +13,11 @@ SELECT id,
   processed
 FROM events
 WHERE id = $1;
--- name: ListUnprocessedEvents :many
+-- name: ListProcessedEvents :many
 SELECT id,
   type,
   payload,
   created_at,
   processed
 FROM events
-WHERE processed = FALSE
-ORDER BY created_at ASC
-LIMIT $1;
+ORDER BY created_at ASC;

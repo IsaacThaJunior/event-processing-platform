@@ -58,20 +58,18 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 	return err
 }
 
-const listUnprocessedEvents = `-- name: ListUnprocessedEvents :many
+const listProcessedEvents = `-- name: ListProcessedEvents :many
 SELECT id,
   type,
   payload,
   created_at,
   processed
 FROM events
-WHERE processed = FALSE
 ORDER BY created_at ASC
-LIMIT $1
 `
 
-func (q *Queries) ListUnprocessedEvents(ctx context.Context, limit int32) ([]Event, error) {
-	rows, err := q.db.Query(ctx, listUnprocessedEvents, limit)
+func (q *Queries) ListProcessedEvents(ctx context.Context) ([]Event, error) {
+	rows, err := q.db.Query(ctx, listProcessedEvents)
 	if err != nil {
 		return nil, err
 	}

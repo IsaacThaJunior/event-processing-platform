@@ -55,10 +55,14 @@ func (p *WorkerPool) worker(id int) {
 
 			// TODO: process task
 			fmt.Printf("Worker %d processing task: %s\n", id, taskID)
+			payload := fmt.Sprintf("processed by worker %d", id)
+			eventType := "processed"
 			ctx := context.Background()
-			err = p.repo.SaveProcessedEvent(ctx, taskID)
+			err = p.repo.SaveProcessedEvent(ctx, taskID, eventType, payload)
 			if err != nil {
 				fmt.Printf("Worker %d failed to save event: %v\n", id, err)
+			} else {
+				fmt.Printf("Worker %d processed and saved task %s\n", id, taskID)
 			}
 		}
 	}
