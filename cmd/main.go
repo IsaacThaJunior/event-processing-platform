@@ -22,6 +22,7 @@ func main() {
 
 	// ✅ Initialize SQLC queries
 	queries := database.New(pool)
+	
 
 	// ✅ Create repository
 	eventRepo := repository.NewEventRepository(queries)
