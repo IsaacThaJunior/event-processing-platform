@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/domain"
@@ -15,6 +16,7 @@ type WorkerPool struct {
 	workers int
 	ctx     context.Context
 	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCount int) *WorkerPool {
@@ -30,11 +32,13 @@ func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCo
 
 func (p *WorkerPool) Start() {
 	for i := 0; i < p.workers; i++ {
+		p.wg.Add(1)
 		go p.worker(i)
 	}
 }
 
 func (p *WorkerPool) worker(id int) {
+	defer p.wg.Done()
 	fmt.Printf("Worker %d started\n", id)
 	for {
 		select {
@@ -55,19 +59,46 @@ func (p *WorkerPool) worker(id int) {
 
 			// TODO: process task
 			fmt.Printf("Worker %d processing task: %s\n", id, taskID)
-			payload := fmt.Sprintf("processed by worker %d", id)
-			eventType := "processed"
-			ctx := context.Background()
-			err = p.repo.SaveProcessedEvent(ctx, taskID, eventType, payload)
-			if err != nil {
-				fmt.Printf("Worker %d failed to save event: %v\n", id, err)
-			} else {
-				fmt.Printf("Worker %d processed and saved task %s\n", id, taskID)
-			}
+			p.processWithRetry(taskID, id)
 		}
 	}
 }
 
 func (p *WorkerPool) Stop() {
 	p.cancel()
+	p.wg.Wait() // Added this for graceful shutdown. It waits for workers to finish
+}
+
+func (p *WorkerPool) processWithRetry(taskID string, workerID int) {
+	maxRetries := 5
+	baseDelay := time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		ctx := context.Background()
+
+		err := p.repo.SaveProcessedEvent(ctx, taskID, "generic", fmt.Sprintf("processed by worker %d", workerID))
+
+		if err == nil {
+			fmt.Printf("Worker %d successfully processed task %s\n", workerID, taskID)
+
+			// ✅ Log success
+			_ = p.repo.LogDeliveryStatus(ctx, taskID, "processed", attempt, "")
+
+			return
+		}
+
+		// ❌ Log retry attempt
+		_ = p.repo.LogDeliveryStatus(ctx, taskID, "retry", attempt, err.Error())
+
+		backoff := baseDelay * time.Duration(1<<(attempt-1))
+		fmt.Printf("Worker %d retrying task %s in %v\n", workerID, taskID, backoff)
+
+		time.Sleep(backoff)
+	}
+
+	// 🚨 After max retries → Dead Letter Queue
+	fmt.Printf("Task %s moved to DLQ\n", taskID)
+
+	_ = p.queue.EnqueueToDLQ(taskID)
+	_ = p.repo.LogDeliveryStatus(context.Background(), taskID, "failed", maxRetries, "max retries exceeded")
 }

@@ -15,3 +15,12 @@ type Event struct {
 	CreatedAt pgtype.Timestamp
 	Processed pgtype.Bool
 }
+
+type EventDeliveryLog struct {
+	ID           int32
+	EventID      string
+	Status       string
+	Attempt      int32
+	ErrorMessage pgtype.Text
+	CreatedAt    pgtype.Timestamp
+}

@@ -12,6 +12,7 @@ type EventRepository interface {
 	SaveProcessedEvent(ctx context.Context, id, eventType, payload string) error
 	GetEventByID(ctx context.Context, id string) (database.Event, error)
 	ListProcessedEvents(ctx context.Context) ([]database.Event, error)
+	LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error
 }
 
 type SQLCEventRepository struct {
@@ -28,7 +29,7 @@ func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventT
 		Type:      eventType,
 		Payload:   payload,
 		CreatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
-		Processed: pgtype.Bool{Bool: true},
+		Processed: pgtype.Bool{Bool: true, Valid: true},
 	})
 }
 
@@ -40,4 +41,13 @@ func (r *SQLCEventRepository) GetEventByID(ctx context.Context, id string) (data
 // ListProcessedEvents fetches all processed events
 func (r *SQLCEventRepository) ListProcessedEvents(ctx context.Context) ([]database.Event, error) {
 	return r.q.ListProcessedEvents(ctx)
+}
+
+func (r *SQLCEventRepository) LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error {
+	return r.q.InsertDeliveryLog(ctx, database.InsertDeliveryLogParams{
+		EventID:      id,
+		Status:       status,
+		Attempt:      int32(attempt),
+		ErrorMessage: pgtype.Text{String: errMsg, Valid: errMsg != ""},
+	})
 }

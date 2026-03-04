@@ -28,9 +28,6 @@ func main() {
 
 	queue := repository.NewRedisQueue(redisClient, "events_queue")
 
-	queue.Enqueue("task-1")
-	queue.Enqueue("task-2")
-
 	// --- Worker pool ---
 	workerPool := worker.NewWorkerPool(queue, eventRepo, 3)
 	workerPool.Start()
