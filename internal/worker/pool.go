@@ -3,10 +3,13 @@ package worker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/domain"
+	"github.com/isaacthajunior/mid-prod/internal/metrics"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 )
 
@@ -17,9 +20,10 @@ type WorkerPool struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+	logger  *slog.Logger
 }
 
-func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCount int) *WorkerPool {
+func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCount int, logger *slog.Logger) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerPool{
 		queue:   queue,
@@ -27,6 +31,7 @@ func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCo
 		workers: workerCount,
 		ctx:     ctx,
 		cancel:  cancel,
+		logger:  logger,
 	}
 }
 
@@ -39,7 +44,9 @@ func (p *WorkerPool) Start() {
 
 func (p *WorkerPool) worker(id int) {
 	defer p.wg.Done()
-	fmt.Printf("Worker %d started\n", id)
+	p.logger.Info("Worker Started",
+		"worker_id", id,
+	)
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -80,14 +87,25 @@ func (p *WorkerPool) processWithRetry(taskID string, workerID int) {
 
 		if err == nil {
 			fmt.Printf("Worker %d successfully processed task %s\n", workerID, taskID)
+			p.logger.Info("processing task",
+				"worker_id", workerID,
+				"task_id", taskID,
+			)
 
 			// ✅ Log success
+			atomic.AddInt64(&metrics.TotalProcessed, 1)
 			_ = p.repo.LogDeliveryStatus(ctx, taskID, "processed", attempt, "")
 
 			return
 		}
 
 		// ❌ Log retry attempt
+		p.logger.Error("failed to process task",
+			"task_id", taskID,
+			"attempt", attempt,
+			"error", err,
+		)
+		atomic.AddInt64(&metrics.TotalRetried, 1)
 		_ = p.repo.LogDeliveryStatus(ctx, taskID, "retry", attempt, err.Error())
 
 		backoff := baseDelay * time.Duration(1<<(attempt-1))
@@ -98,7 +116,11 @@ func (p *WorkerPool) processWithRetry(taskID string, workerID int) {
 
 	// 🚨 After max retries → Dead Letter Queue
 	fmt.Printf("Task %s moved to DLQ\n", taskID)
+	atomic.AddInt64(&metrics.TotalFailed, 1)
 
 	_ = p.queue.EnqueueToDLQ(taskID)
 	_ = p.repo.LogDeliveryStatus(context.Background(), taskID, "failed", maxRetries, "max retries exceeded")
+	p.logger.Info("Moving task to Dead letter Queue",
+		"task_id", taskID,
+	)
 }

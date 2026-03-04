@@ -39,3 +39,7 @@ func (r *RedisQueue) Dequeue() (string, error) {
 func (r *RedisQueue) EnqueueToDLQ(taskID string) error {
 	return r.client.LPush(context.Background(), "dead_letter_queue", taskID).Err()
 }
+
+func (r *RedisQueue) Depth() (int64, error) {
+	return r.client.LLen(context.Background(), "events_queue").Result()
+}
