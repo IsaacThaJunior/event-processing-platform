@@ -22,7 +22,7 @@ Here is the high level architecture for this project:
 ## Core Components
 1. **Redis Queue**
 
-Redis is used as a lightweight message broker.
+Redis is used as a lightweight queue for background jobs.
 
 - `LPUSH` → enqueue event
 - `RPOP` → dequeuing events
@@ -239,5 +239,6 @@ For production deployment:
 - Operational observability
 - Production-oriented backend thinking
 ----------
+
 
 
