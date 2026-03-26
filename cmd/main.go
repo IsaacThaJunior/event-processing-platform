@@ -18,11 +18,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to connect to db: %v", err)
 	}
+	log.Println("Connected to Postgres successfully")
+
 	defer pool.Close()
 
 	// ✅ Initialize SQLC queries
 	queries := database.New(pool)
-	
 
 	// ✅ Create repository
 	eventRepo := repository.NewEventRepository(queries)
@@ -37,8 +38,6 @@ func main() {
 	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger)
 	workerPool.Start()
 	defer workerPool.Stop()
-
-	log.Println("Connected to Postgres successfully")
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK"))
