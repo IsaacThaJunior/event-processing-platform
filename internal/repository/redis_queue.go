@@ -41,5 +41,5 @@ func (r *RedisQueue) EnqueueToDLQ(taskID string) error {
 }
 
 func (r *RedisQueue) Depth() (int64, error) {
-	return r.client.LLen(r.ctx, "events_queue").Result()
+	return r.client.LLen(r.ctx, r.key).Result()
 }
