@@ -15,7 +15,7 @@ import (
 
 type WorkerPool struct {
 	queue   domain.Queue
-	repo    repository.EventRepository
+	repo    *repository.SQLCEventRepository
 	workers int
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -23,7 +23,7 @@ type WorkerPool struct {
 	logger  *slog.Logger
 }
 
-func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCount int, logger *slog.Logger) *WorkerPool {
+func NewWorkerPool(queue domain.Queue, repo *repository.SQLCEventRepository, workerCount int, logger *slog.Logger) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerPool{
 		queue:   queue,

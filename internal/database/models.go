@@ -9,11 +9,15 @@ import (
 )
 
 type Event struct {
-	ID        string
-	Type      string
-	Payload   string
-	CreatedAt pgtype.Timestamp
-	Processed pgtype.Bool
+	ID                string
+	Type              string
+	Payload           string
+	CreatedAt         pgtype.Timestamp
+	WhatsappMessageID pgtype.Text
+	FromNumber        pgtype.Text
+	Command           pgtype.Text
+	Status            pgtype.Text
+	UpdatedAt         pgtype.Timestamp
 }
 
 type EventDeliveryLog struct {
@@ -23,4 +27,12 @@ type EventDeliveryLog struct {
 	Attempt      int32
 	ErrorMessage pgtype.Text
 	CreatedAt    pgtype.Timestamp
+}
+
+type IdempotencyKey struct {
+	Key       string
+	EventID   string
+	CreatedAt pgtype.Timestamp
+	ExpiresAt pgtype.Timestamp
+	Metadata  []byte
 }

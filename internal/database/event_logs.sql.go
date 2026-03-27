@@ -11,6 +11,40 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getDeliveryLogsForEvent = `-- name: GetDeliveryLogsForEvent :many
+SELECT id, event_id, status, attempt, error_message, created_at
+FROM event_delivery_logs
+WHERE event_id = $1
+ORDER BY attempt ASC
+`
+
+func (q *Queries) GetDeliveryLogsForEvent(ctx context.Context, eventID string) ([]EventDeliveryLog, error) {
+	rows, err := q.db.Query(ctx, getDeliveryLogsForEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []EventDeliveryLog
+	for rows.Next() {
+		var i EventDeliveryLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.Status,
+			&i.Attempt,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertDeliveryLog = `-- name: InsertDeliveryLog :exec
 INSERT INTO event_delivery_logs (
     event_id,

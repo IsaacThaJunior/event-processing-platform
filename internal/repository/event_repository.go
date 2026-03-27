@@ -26,10 +26,9 @@ func NewEventRepository(q *database.Queries) *SQLCEventRepository {
 func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload string) error {
 	return r.q.InsertEvent(ctx, database.InsertEventParams{
 		ID:        id,
-		Type:      eventType,
+		Status:    pgtype.Text{String: eventType, Valid: eventType != ""},
 		Payload:   payload,
 		CreatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
-		Processed: pgtype.Bool{Bool: true, Valid: true},
 	})
 }
 
@@ -40,7 +39,7 @@ func (r *SQLCEventRepository) GetEventByID(ctx context.Context, id string) (data
 
 // ListProcessedEvents fetches all processed events
 func (r *SQLCEventRepository) ListProcessedEvents(ctx context.Context) ([]database.Event, error) {
-	return r.q.ListProcessedEvents(ctx)
+	return r.q.ListEvents(ctx)
 }
 
 func (r *SQLCEventRepository) LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error {
