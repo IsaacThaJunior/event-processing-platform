@@ -66,9 +66,10 @@ INSERT INTO events (
     payload,
     status,
     created_at,
-    updated_at
+    updated_at,
+    type
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 `
 
 type InsertEventParams struct {
@@ -80,6 +81,7 @@ type InsertEventParams struct {
 	Status            pgtype.Text
 	CreatedAt         pgtype.Timestamp
 	UpdatedAt         pgtype.Timestamp
+	Type              string
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error {
@@ -92,6 +94,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.Status,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.Type,
 	)
 	return err
 }

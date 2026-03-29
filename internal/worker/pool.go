@@ -1,13 +1,16 @@
+// internal/worker/pool.go
 package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/metrics"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
@@ -23,11 +26,16 @@ type WorkerPool struct {
 	logger  *slog.Logger
 }
 
-func NewWorkerPool(queue domain.Queue, repo repository.EventRepository, workerCount int, logger *slog.Logger) *WorkerPool {
+func NewWorkerPool(
+	queue domain.Queue,
+	eventRepo repository.EventRepository,
+	workerCount int,
+	logger *slog.Logger,
+) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerPool{
 		queue:   queue,
-		repo:    repo,
+		repo:    eventRepo,
 		workers: workerCount,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -44,83 +52,183 @@ func (p *WorkerPool) Start() {
 
 func (p *WorkerPool) worker(id int) {
 	defer p.wg.Done()
-	p.logger.Info("Worker Started",
-		"worker_id", id,
-	)
+	p.logger.Info("Worker Started", "worker_id", id)
+
 	for {
 		select {
 		case <-p.ctx.Done():
 			fmt.Printf("Worker %d stopping\n", id)
 			return
 		default:
-			taskID, err := p.queue.Dequeue()
+			// Dequeue returns the event ID (not JSON anymore)
+			eventID, err := p.queue.Dequeue()
 			if err != nil {
 				fmt.Println("Dequeue error:", err)
 				time.Sleep(1 * time.Second)
 				continue
 			}
-			if taskID == "" {
+			if eventID == "" {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
-			// TODO: process task
-			fmt.Printf("Worker %d processing task: %s\n", id, taskID)
-			p.processWithRetry(taskID, id)
+			fmt.Printf("Worker %d processing task: %s\n", id, eventID)
+			p.processWithRetry(eventID, id)
 		}
 	}
 }
 
 func (p *WorkerPool) Stop() {
 	p.cancel()
-	p.wg.Wait() // Added this for graceful shutdown. It waits for workers to finish
+	p.wg.Wait()
 }
 
-func (p *WorkerPool) processWithRetry(taskID string, workerID int) {
+func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 	maxRetries := 5
 	baseDelay := time.Second
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		ctx := context.Background()
 
-		err := p.repo.SaveProcessedEvent(ctx, taskID, "generic", fmt.Sprintf("processed by worker %d", workerID))
+		// Get the event from database to get all metadata
+		event, err := p.repo.GetEventByID(ctx, eventID)
+		if err != nil {
+			p.logger.Error("Failed to get event from DB",
+				"event_id", eventID,
+				"attempt", attempt,
+				"error", err,
+			)
+			// Retry if we can't get the event
+			backoff := baseDelay * time.Duration(1<<(attempt-1))
+			time.Sleep(backoff)
+			continue
+		}
+
+		// Execute the actual job based on command
+		err = p.executeJob(ctx, event)
 
 		if err == nil {
-			fmt.Printf("Worker %d successfully processed task %s\n", workerID, taskID)
-			p.logger.Info("processing task",
+			fmt.Printf("Worker %d successfully processed task %s\n", workerID, eventID)
+			p.logger.Info("processing task successful",
 				"worker_id", workerID,
-				"task_id", taskID,
+				"task_id", eventID,
+				"command", event.Command,
 			)
 
-			// ✅ Log success
+			// Update event status to processed
+			_ = p.repo.UpdateEventStatus(ctx, eventID, "processed")
+
+			// Log success
 			atomic.AddInt64(&metrics.TotalProcessed, 1)
-			_ = p.repo.LogDeliveryStatus(ctx, taskID, "processed", attempt, "")
+			_ = p.repo.LogDeliveryStatus(ctx, eventID, "processed", attempt, "")
 
 			return
 		}
 
-		// ❌ Log retry attempt
+		// Log retry attempt
 		p.logger.Error("failed to process task",
-			"task_id", taskID,
+			"task_id", eventID,
+			"command", event.Command,
 			"attempt", attempt,
 			"error", err,
 		)
 		atomic.AddInt64(&metrics.TotalRetried, 1)
-		_ = p.repo.LogDeliveryStatus(ctx, taskID, "retry", attempt, err.Error())
+		_ = p.repo.LogDeliveryStatus(ctx, eventID, "retry", attempt, err.Error())
 
 		backoff := baseDelay * time.Duration(1<<(attempt-1))
-		fmt.Printf("Worker %d retrying task %s in %v\n", workerID, taskID, backoff)
-
+		fmt.Printf("Worker %d retrying task %s in %v\n", workerID, eventID, backoff)
 		time.Sleep(backoff)
 	}
 
-	// 🚨 After max retries → Dead Letter Queue
-	fmt.Printf("Task %s moved to DLQ\n", taskID)
+	// After max retries → Dead Letter Queue
+	fmt.Printf("Task %s moved to DLQ\n", eventID)
 	atomic.AddInt64(&metrics.TotalFailed, 1)
 
-	_ = p.queue.EnqueueToDLQ(taskID)
-	_ = p.repo.LogDeliveryStatus(context.Background(), taskID, "failed", maxRetries, "max retries exceeded")
+	// Update event status to failed
+	_ = p.repo.UpdateEventStatus(context.Background(), eventID, "failed")
+
+	// Log final failure
+	_ = p.repo.LogDeliveryStatus(context.Background(), eventID, "failed", maxRetries, "max retries exceeded")
+
+	// Push to DLQ
+	_ = p.queue.EnqueueToDLQ(eventID)
 	p.logger.Info("Moving task to Dead letter Queue",
-		"task_id", taskID,
+		"task_id", eventID,
 	)
+}
+
+func (p *WorkerPool) executeJob(ctx context.Context, event database.Event) error {
+	// Route to the appropriate job handler based on command
+	if !event.Command.Valid {
+		return fmt.Errorf("command is null for event %s", event.ID)
+	}
+	switch event.Command.String {
+	case "resize_image":
+		return p.handleResizeImage(ctx, event)
+	case "scrape_url":
+		return p.handleScrapeURL(ctx, event)
+	case "generate_report":
+		return p.handleGenerateReport(ctx, event)
+	default:
+		return fmt.Errorf("unknown command: %v", event.Command)
+	}
+}
+
+func (p *WorkerPool) handleResizeImage(ctx context.Context, event database.Event) error {
+	// Parse payload
+	var params struct {
+		ImageURL string `json:"image_url"`
+		Width    int    `json:"width"`
+		Height   int    `json:"height"`
+	}
+	if err := json.Unmarshal([]byte(event.Payload), &params); err != nil {
+		return fmt.Errorf("failed to parse resize params: %w", err)
+	}
+
+	// Validate parameters
+	if params.ImageURL == "" {
+		return fmt.Errorf("image_url is required")
+	}
+
+	fmt.Printf("📷 [Job] Resizing image %s to %dx%d for user %v\n",
+		params.ImageURL, params.Width, params.Height, event.FromNumber)
+
+	// TODO: Implement actual image resizing logic here
+	time.Sleep(1 * time.Second)
+
+	return nil
+}
+
+func (p *WorkerPool) handleScrapeURL(ctx context.Context, event database.Event) error {
+	var params struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(event.Payload), &params); err != nil {
+		return fmt.Errorf("failed to parse scrape params: %w", err)
+	}
+
+	if params.URL == "" {
+		return fmt.Errorf("url is required")
+	}
+
+	fmt.Printf("🔍 [Job] Scraping URL %s for user %v\n", params.URL, event.FromNumber)
+
+	// TODO: Implement actual URL scraping logic here
+
+	return nil
+}
+
+func (p *WorkerPool) handleGenerateReport(ctx context.Context, event database.Event) error {
+	var params struct {
+		Date string `json:"date"`
+	}
+	if err := json.Unmarshal([]byte(event.Payload), &params); err != nil {
+		return fmt.Errorf("failed to parse report params: %w", err)
+	}
+
+	fmt.Printf("📊 [Job] Generating report for date %s for user %v\n", params.Date, event.FromNumber)
+
+	// TODO: Implement actual report generation logic here
+
+	return nil
 }

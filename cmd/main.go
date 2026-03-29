@@ -7,8 +7,10 @@ import (
 	"net/http"
 
 	"github.com/isaacthajunior/mid-prod/internal/database"
+	"github.com/isaacthajunior/mid-prod/internal/handler"
 	"github.com/isaacthajunior/mid-prod/internal/metrics"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
+	"github.com/isaacthajunior/mid-prod/internal/service"
 	"github.com/isaacthajunior/mid-prod/internal/worker"
 )
 
@@ -28,11 +30,19 @@ func main() {
 	// ✅ Create repository
 	eventRepo := repository.NewEventRepository(queries)
 
+	// Create the idempotency service
+	idempotencyService := service.NewIdempotencyService(queries, pool)
+
+	// Create the command parser
+	commandParser := service.NewCommandParser()
+
 	// --- We using Redis queue ---
 	redisClient := repository.NewRedisClient()
 	defer redisClient.Close()
 
 	queue := repository.NewRedisQueue(redisClient, "events_queue")
+
+	_ = handler.NewWhatsAppHandler(queue, commandParser, logger, eventRepo, idempotencyService)
 
 	// --- Worker pool ---
 	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger)

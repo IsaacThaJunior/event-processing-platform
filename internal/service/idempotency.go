@@ -33,7 +33,7 @@ type IdempotencyMetadata struct {
 	Command    string                 `json:"command,omitempty"`
 	Source     string                 `json:"source,omitempty"` // whatsapp, api, etc.
 	Timestamp  int64                  `json:"timestamp,omitempty"`
-	Custom     map[string]interface{} `json:"custom,omitempty"`
+	Custom     map[string]any `json:"custom,omitempty"`
 }
 
 func NewIdempotencyService(q *database.Queries, db *pgxpool.Pool) *IdempotencyRepo {

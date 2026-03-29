@@ -9,10 +9,11 @@ import (
 )
 
 type EventRepository interface {
-	SaveProcessedEvent(ctx context.Context, id, eventType, payload string) error
+	SaveProcessedEvent(ctx context.Context, id, eventType, payload, whatsapp_message_id, from_number, status string) error
 	GetEventByID(ctx context.Context, id string) (database.Event, error)
 	ListProcessedEvents(ctx context.Context) ([]database.Event, error)
 	LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error
+	UpdateEventStatus(ctx context.Context, id, status string) error
 }
 
 type SQLCEventRepository struct {
@@ -23,12 +24,18 @@ func NewEventRepository(q *database.Queries) *SQLCEventRepository {
 	return &SQLCEventRepository{q: q}
 }
 
-func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload string) error {
+func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, whatsapp_message_id, from_number, status string) error {
+
 	return r.q.InsertEvent(ctx, database.InsertEventParams{
-		ID:        id,
-		Status:    pgtype.Text{String: eventType, Valid: eventType != ""},
-		Payload:   payload,
-		CreatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
+		ID:                id,
+		Status:            pgtype.Text{String: "pending", Valid: true},
+		Payload:           payload,
+		CreatedAt:         pgtype.Timestamp{Time: time.Now(), Valid: true},
+		WhatsappMessageID: pgtype.Text{String: whatsapp_message_id, Valid: whatsapp_message_id != ""},
+		FromNumber:        pgtype.Text{String: from_number, Valid: from_number != ""},
+		UpdatedAt:         pgtype.Timestamp{Time: time.Now(), Valid: true},
+		Type:              eventType,
+		Command:           pgtype.Text{String: eventType, Valid: eventType != ""},
 	})
 }
 
@@ -48,5 +55,12 @@ func (r *SQLCEventRepository) LogDeliveryStatus(ctx context.Context, id, status 
 		Status:       status,
 		Attempt:      int32(attempt),
 		ErrorMessage: pgtype.Text{String: errMsg, Valid: errMsg != ""},
+	})
+}
+
+func (r *SQLCEventRepository) UpdateEventStatus(ctx context.Context, id, status string) error {
+	return r.q.UpdateEventStatus(ctx, database.UpdateEventStatusParams{
+		ID:     id,
+		Status: pgtype.Text{String: status, Valid: true},
 	})
 }
