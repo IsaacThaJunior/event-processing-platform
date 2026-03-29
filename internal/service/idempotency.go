@@ -2,13 +2,14 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/isaacthajunior/mid-prod/internal/database"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -29,10 +30,10 @@ type IdempotencyRecord struct {
 
 // IdempotencyMetadata contains additional context for the idempotency record
 type IdempotencyMetadata struct {
-	FromNumber string                 `json:"from_number,omitempty"`
-	Command    string                 `json:"command,omitempty"`
-	Source     string                 `json:"source,omitempty"` // whatsapp, api, etc.
-	Timestamp  int64                  `json:"timestamp,omitempty"`
+	FromNumber string         `json:"from_number,omitempty"`
+	Command    string         `json:"command,omitempty"`
+	Source     string         `json:"source,omitempty"` // whatsapp, api, etc.
+	Timestamp  int64          `json:"timestamp,omitempty"`
 	Custom     map[string]any `json:"custom,omitempty"`
 }
 
@@ -49,6 +50,10 @@ func (s *IdempotencyRepo) CheckAndRecord(
 	eventID string,
 	metadata *IdempotencyMetadata,
 ) (bool, error) {
+	slog.Info("CheckAndRecord called",
+		"key", key,
+		"event_id", eventID,
+		"metadata", metadata)
 	// Use a transaction for this
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -58,23 +63,40 @@ func (s *IdempotencyRepo) CheckAndRecord(
 	// Create transaction-specific queries
 	qtx := s.q.WithTx(tx)
 
-	_, err = qtx.GetIdempotencyKey(ctx, key)
+	existing, err := qtx.GetIdempotencyKey(ctx, key)
 	// This is the happy path
-	if err == nil {
+	// Check if the error is "no rows" (key doesn't exist)
+	if err != nil {
+		// Check if it's a "no rows" error
+		if err.Error() == "no rows in result set" || err == pgx.ErrNoRows {
+			// Key doesn't exist - this is fine, we'll create it
+			slog.Info("No existing idempotency key found, will create new one", "key", key)
+		} else {
+			// Real database error
+			slog.Error("Error checking idempotency key", "error", err)
+			return false, fmt.Errorf("failed to check idempotency: %w", err)
+		}
+	} else {
+		// Key exists - already processed
+		slog.Info("Idempotency key already exists",
+			"key", key,
+			"existing_event_id", existing.EventID)
 		return true, nil
 	}
-	if err != sql.ErrNoRows {
-		return false, fmt.Errorf("failed to check idempotency: %w", err)
-	}
+
+	slog.Info("Creating new idempotency key", "key", key, "event_id", eventID)
 
 	// Prepare metadata JSON
 	metadataJSON := "{}"
 	if metadata != nil {
 		jsonBytes, err := json.Marshal(metadata)
 		if err != nil {
+			slog.Error("Failed to marshal metadata", "error", err)
 			return false, fmt.Errorf("failed to marshal metadata: %w", err)
 		}
 		metadataJSON = string(jsonBytes)
+		slog.Info("Metadata marshaled", "metadata", metadataJSON)
+
 	}
 
 	// Key doesn't exist - insert it
@@ -87,23 +109,26 @@ func (s *IdempotencyRepo) CheckAndRecord(
 		Metadata:  []byte(metadataJSON),
 	})
 	if err != nil {
+		slog.Error("Failed to insert idempotency key", "error", err)
 		return false, fmt.Errorf("failed to insert idempotency key: %w", err)
 	}
 
 	// Commit transaction
 	if err := tx.Commit(ctx); err != nil {
+		slog.Error("Failed to commit transaction", "error", err)
 		return false, fmt.Errorf("failed to commit transaction: %w", err)
 	}
-
+	slog.Info("Idempotency key created successfully", "key", key, "event_id", eventID)
 	return false, nil
 }
 
 func (s *IdempotencyRepo) Isprocessed(ctx context.Context, key string) (bool, string, error) {
 	idempotencyKey, err := s.q.GetIdempotencyKey(ctx, key)
-	if err == sql.ErrNoRows {
-		return false, "", nil
-	}
+
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return false, "", nil
+		}
 		return false, "", fmt.Errorf("failed to check idempotency: %w", err)
 	}
 
@@ -143,6 +168,10 @@ func (s *IdempotencyRepo) GetStats(ctx context.Context) (total, active, expired 
 	}
 
 	return stats.TotalKeys, stats.ActiveKeys, stats.ExpiredKeys, nil
+}
+
+func (s *IdempotencyRepo) DeleteKey(ctx context.Context, idKey string) error {
+	return s.q.DeleteIdempotencyKey(ctx, idKey)
 }
 
 // WithIdempotency is a helper that wraps a function with idempotency check and might be used for handling Whatsapp webhooks

@@ -22,4 +22,6 @@ SELECT COUNT(*) as total_keys,
     END
   ) as expired_keys
 FROM idempotency_keys;
-
+-- name: DeleteIdempotencyKey :exec
+DELETE FROM idempotency_keys
+WHERE key = $1;

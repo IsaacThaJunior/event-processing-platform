@@ -3,6 +3,8 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -53,6 +55,7 @@ func (h *WhatsAppHandler) processMessage(ctx context.Context, message struct {
 	// Step 1: Check idempotency - has this message been processed before?
 	processed, existingEventID, err := h.idempotency.Isprocessed(ctx, message.ID)
 	if err != nil {
+		h.logger.Error("Idempotency check failed", "error", err, "message_id", message.ID)
 		return err
 	}
 
@@ -179,8 +182,17 @@ func (h *WhatsAppHandler) HandleVerification(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(map[string]string{"status": "verification endpoint ready"})
 }
 
+func generateIdempotencyKey(command, fromNumber, payload string) string {
+	content := fmt.Sprintf("%s:%s:%s", command, fromNumber, payload)
+	// Create SHA256 hash
+	hash := sha256.Sum256([]byte(content))
+	// Return first 32 characters of hex hash (enough for uniqueness)
+	return "msg_" + hex.EncodeToString(hash[:16])
+}
+
 // HandleTestPush is a test endpoint for manual testing
 func (h *WhatsAppHandler) HandleTestPush(w http.ResponseWriter, r *http.Request) {
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -198,35 +210,117 @@ func (h *WhatsAppHandler) HandleTestPush(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Generate IDs
-	eventID := uuid.New().String()
-	whatsappMsgID := "test_" + uuid.New().String()[:8]
+	// Generate DETERMINISTIC idempotency key based on content
+	// Same content = same key EVERY time
+	idempotencyKey := generateIdempotencyKey(req.Command, req.FromNumber, req.Payload)
 
-	// Create event in database
-	err := h.eventRepo.SaveProcessedEvent(r.Context(), eventID, req.Command, req.Payload, whatsappMsgID, req.FromNumber, "pending")
-	if err != nil {
-		// If SaveProcessedEvent is for processed events only, use CreateEvent instead
-		// You might need to add a CreateEvent method to your repository
-		http.Error(w, fmt.Sprintf("Failed to create event: %v", err), http.StatusInternalServerError)
-		return
-	}
+	whatsappMsgID := idempotencyKey // Use the deterministic key as the whatsapp_message_id
 
-	// Push to Redis
-	if err := h.queue.Enqueue(eventID); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to enqueue: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	h.logger.Info("Test event pushed",
-		"event_id", eventID,
+	h.logger.Info("Processing test push",
+		"idempotency_key", idempotencyKey,
 		"command", req.Command,
 		"from", req.FromNumber,
 	)
 
+	// STEP 1: Check idempotency FIRST
+	processed, existingEventID, err := h.idempotency.Isprocessed(r.Context(), idempotencyKey)
+	if err != nil {
+		h.logger.Error("Idempotency check failed", "error", err)
+		http.Error(w, "Idempotency check failed", http.StatusInternalServerError)
+		return
+	}
+
+	if processed {
+		// Duplicate detected - reject immediately
+		h.logger.Info("Duplicate message rejected by idempotency",
+			"idempotency_key", idempotencyKey,
+			"existing_event_id", existingEventID,
+		)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":            "duplicate",
+			"message":           "This exact message has already been processed",
+			"existing_event_id": existingEventID,
+			"idempotency_key":   idempotencyKey,
+		})
+		return
+	}
+
+	// Step 2: Generate IDs
+	eventID := uuid.New().String()
+
+	h.logger.Info("First time request - creating new event",
+		"event_id", eventID,
+		"idempotency_key", idempotencyKey,
+	)
+
+	// STEP 3: Create event in database FIRST (so the event exists for the foreign key)
+	err = h.eventRepo.SaveProcessedEvent(r.Context(), eventID, req.Command, req.Payload, whatsappMsgID, req.FromNumber, "pending")
+
+	if err != nil {
+		h.logger.Error("Failed to create event", "error", err)
+		// Clean up the idempotency key since event creation failed
+		_ = h.idempotency.DeleteKey(r.Context(), idempotencyKey)
+		http.Error(w, fmt.Sprintf("Failed to create event: %v", err), http.StatusInternalServerError)
+		return
+	}
+	h.logger.Info("Event created in database", "event_id", eventID)
+
+	// STEP 4: Create idempotency key with event ID
+	metadata := &service.IdempotencyMetadata{
+		FromNumber: req.FromNumber,
+		Command:    req.Command,
+		Source:     "test_api",
+		Timestamp:  time.Now().Unix(),
+		Custom: map[string]any{
+			"original_text":   req.OriginalText,
+			"test_endpoint":   true,
+			"idempotency_key": idempotencyKey,
+		},
+	}
+	h.logger.Info("About to call CheckAndRecord",
+		"whatsappMsgID", whatsappMsgID,
+		"eventID", eventID)
+
+	processed, err = h.idempotency.CheckAndRecord(r.Context(), idempotencyKey, eventID, metadata)
+	if err != nil {
+		h.logger.Error("Failed to create idempotency key", "error", err)
+		http.Error(w, "Failed to create idempotency key", http.StatusInternalServerError)
+		return
+	}
+
+	if processed {
+		// Race condition - another request created it between our check and this call
+		h.logger.Warn("Race condition: key was created by another process",
+			"idempotency_key", idempotencyKey)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":          "duplicate",
+			"message":         "This message was processed by another concurrent request",
+			"idempotency_key": idempotencyKey,
+		})
+		return
+	}
+
+	// STEP 5: Push to Redis
+	if err := h.queue.Enqueue(eventID); err != nil {
+		h.logger.Error("Failed to enqueue to Redis", "error", err)
+		http.Error(w, fmt.Sprintf("Failed to enqueue: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	h.logger.Info("Test event pushed successfully",
+		"event_id", eventID,
+		"command", req.Command,
+		"from", req.FromNumber,
+		"idempotency_key", idempotencyKey,
+	)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":   "accepted",
-		"event_id": eventID,
-		"message":  "Test event pushed successfully",
+		"status":          "accepted",
+		"event_id":        eventID,
+		"idempotency_key": idempotencyKey,
+		"message":         "Test event pushed successfully",
 	})
 }
