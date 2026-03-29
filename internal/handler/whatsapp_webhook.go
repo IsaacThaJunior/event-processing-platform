@@ -4,6 +4,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -39,32 +40,6 @@ func NewWhatsAppHandler(
 		eventRepo:     eventRepo,
 		idempotency:   idempotency,
 	}
-}
-
-// HandleWebhook receives messages from WhatsApp
-func (h *WhatsAppHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
-	var payload domain.WhatsAppWebhookPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		h.logger.Error("Failed to decode webhook", "error", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	for _, entry := range payload.Entry {
-		for _, change := range entry.Changes {
-			for _, message := range change.Value.Messages {
-				if err := h.processMessage(r.Context(), message); err != nil {
-					h.logger.Error("Failed to process message",
-						"message_id", message.ID,
-						"error", err,
-					)
-				}
-			}
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (h *WhatsAppHandler) processMessage(ctx context.Context, message struct {
@@ -148,4 +123,110 @@ func (h *WhatsAppHandler) processMessage(ctx context.Context, message struct {
 	)
 
 	return nil
+}
+
+// HandleWebhook receives messages from WhatsApp
+func (h *WhatsAppHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	// For GET requests - verification
+	if r.Method == http.MethodGet {
+		h.HandleVerification(w, r)
+		return
+	}
+
+	// For POST requests - actual webhook
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload domain.WhatsAppWebhookPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		h.logger.Error("Failed to decode webhook", "error", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Process each message
+	for _, entry := range payload.Entry {
+		for _, change := range entry.Changes {
+			for _, message := range change.Value.Messages {
+				if err := h.processMessage(r.Context(), message); err != nil {
+					h.logger.Error("Failed to process message",
+						"message_id", message.ID,
+						"error", err,
+					)
+				}
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// HandleVerification handles WhatsApp webhook verification
+func (h *WhatsAppHandler) HandleVerification(w http.ResponseWriter, r *http.Request) {
+	// WhatsApp sends a GET request with hub.challenge for verification
+	challenge := r.URL.Query().Get("hub.challenge")
+	if challenge != "" {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(challenge))
+		return
+	}
+
+	// If no challenge, it's a test request
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "verification endpoint ready"})
+}
+
+// HandleTestPush is a test endpoint for manual testing
+func (h *WhatsAppHandler) HandleTestPush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Command      string `json:"command"`
+		FromNumber   string `json:"from_number"`
+		Payload      string `json:"payload"`
+		OriginalText string `json:"original_text"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Generate IDs
+	eventID := uuid.New().String()
+	whatsappMsgID := "test_" + uuid.New().String()[:8]
+
+	// Create event in database
+	err := h.eventRepo.SaveProcessedEvent(r.Context(), eventID, req.Command, req.Payload, whatsappMsgID, req.FromNumber, "pending")
+	if err != nil {
+		// If SaveProcessedEvent is for processed events only, use CreateEvent instead
+		// You might need to add a CreateEvent method to your repository
+		http.Error(w, fmt.Sprintf("Failed to create event: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Push to Redis
+	if err := h.queue.Enqueue(eventID); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to enqueue: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	h.logger.Info("Test event pushed",
+		"event_id", eventID,
+		"command", req.Command,
+		"from", req.FromNumber,
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "accepted",
+		"event_id": eventID,
+		"message":  "Test event pushed successfully",
+	})
 }
