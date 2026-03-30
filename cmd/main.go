@@ -73,7 +73,7 @@ queue_depth: %d
 	http.HandleFunc("/webhook", whatsAppSvc.HandleWebhook)
 
 	// ✅ WhatsApp verification endpoint (for Meta webhook setup)
-	// http.HandleFunc("/webhook/verify", whatsAppSvc.HandleVerification)
+	http.HandleFunc("/webhook/verify", whatsAppSvc.HandleVerification)
 
 	// // ✅ Test endpoint to push events (for manual testing)
 	http.HandleFunc("/test/push", whatsAppSvc.HandleTestPush)

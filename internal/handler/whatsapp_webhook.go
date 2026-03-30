@@ -317,7 +317,7 @@ func (h *WhatsAppHandler) HandleTestPush(w http.ResponseWriter, r *http.Request)
 	)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"status":          "accepted",
 		"event_id":        eventID,
 		"idempotency_key": idempotencyKey,
