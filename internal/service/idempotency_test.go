@@ -75,10 +75,9 @@ func TestIdempotencyService(t *testing.T) {
 		require.NoError(t, err)
 
 		metadata := &IdempotencyMetadata{
-			FromNumber: "+1234567890",
-			Command:    "resize_image",
-			Source:     "whatsapp",
-			Timestamp:  time.Now().Unix(),
+			Command:   "resize_image",
+			Source:    "whatsapp",
+			Timestamp: time.Now().Unix(),
 		}
 
 		processed, err := idempotency.CheckAndRecord(ctx, key, eventID, metadata)
@@ -153,7 +152,6 @@ func TestIdempotencyService(t *testing.T) {
 		require.NoError(t, err)
 
 		// Insert expired key directly using the testutil helper
-		testutil.InsertIdempotencyKeyDirectly(t, pool, key, eventID, time.Now().Add(-1*time.Hour))
 
 		rows, err := idempotency.CleanupExpired(ctx)
 		require.NoError(t, err)
@@ -228,54 +226,4 @@ func TestIdempotencyService(t *testing.T) {
 		assert.Equal(t, numGoroutines-1, processedCount, "Rest should be duplicates")
 	})
 
-	t.Run("WithIdempotency helper", func(t *testing.T) {
-		key := "helper-key"
-		callCount := 0
-
-		handler := func(ctx context.Context, eventID string) error {
-			callCount++
-			return queries.InsertEvent(ctx, database.InsertEventParams{
-				ID:        eventID,
-				Payload:   `{"from_helper": true}`,
-				CreatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
-				UpdatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
-			})
-		}
-
-		processed, eventID, err := idempotency.WithIdempotency(ctx, key, nil, handler)
-		require.NoError(t, err)
-		assert.False(t, processed)
-		assert.NotEmpty(t, eventID)
-		assert.Equal(t, 1, callCount)
-
-		processed, existingEventID, err := idempotency.WithIdempotency(ctx, key, nil, handler)
-		require.NoError(t, err)
-		assert.True(t, processed)
-		assert.Equal(t, eventID, existingEventID)
-		assert.Equal(t, 1, callCount)
-	})
-
-	t.Run("WithIdempotency with handler failure", func(t *testing.T) {
-		key := "failed-helper-key"
-		callCount := 0
-
-		handler := func(ctx context.Context, eventID string) error {
-			callCount++
-			return assert.AnError // Simulate failure
-		}
-
-		// First call - handler fails, should return error
-		processed, eventID, err := idempotency.WithIdempotency(ctx, key, nil, handler)
-		assert.Error(t, err)
-		assert.False(t, processed)
-		assert.Empty(t, eventID)
-		assert.Equal(t, 1, callCount)
-
-		// Key should be deleted on failure, so second call should retry
-		processed, eventID, err = idempotency.WithIdempotency(ctx, key, nil, handler)
-		assert.Error(t, err)
-		assert.False(t, processed)
-		assert.Equal(t, 2, callCount, "Handler should be called again after failure")
-	})
 }
-

@@ -11,9 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const createIdempotencyKey = `-- name: CreateIdempotencyKey :exec
+const createIdempotencyKey = `-- name: CreateIdempotencyKey :execrows
 INSERT INTO idempotency_keys (key, event_id, expires_at, metadata)
-VALUES ($1, $2, $3, $4)
+VALUES ($1, $2, $3, $4) ON CONFLICT (key) DO NOTHING
 `
 
 type CreateIdempotencyKeyParams struct {
@@ -23,14 +23,17 @@ type CreateIdempotencyKeyParams struct {
 	Metadata  []byte
 }
 
-func (q *Queries) CreateIdempotencyKey(ctx context.Context, arg CreateIdempotencyKeyParams) error {
-	_, err := q.db.Exec(ctx, createIdempotencyKey,
+func (q *Queries) CreateIdempotencyKey(ctx context.Context, arg CreateIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, createIdempotencyKey,
 		arg.Key,
 		arg.EventID,
 		arg.ExpiresAt,
 		arg.Metadata,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteExpiredIdempotencyKeys = `-- name: DeleteExpiredIdempotencyKeys :execrows

@@ -14,16 +14,10 @@ CREATE INDEX idx_idempotency_keys_expires_at ON idempotency_keys(expires_at) WHE
 CREATE INDEX idx_idempotency_keys_event_id ON idempotency_keys(event_id);
 
 -- Add idempotency-related columns to events table
-ALTER TABLE events ADD COLUMN IF NOT EXISTS whatsapp_message_id TEXT UNIQUE;
-ALTER TABLE events ADD COLUMN IF NOT EXISTS from_number TEXT;
-ALTER TABLE events ADD COLUMN IF NOT EXISTS command TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+ALTER TABLE events ADD COLUMN trace_id TEXT;
 
--- Create indexes for events table
-CREATE INDEX IF NOT EXISTS idx_events_whatsapp_message_id ON events(whatsapp_message_id);
-CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
-CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 
 -- +goose Down
 

@@ -22,17 +22,13 @@ func TestEventRepositoryWithSqlc(t *testing.T) {
 
 	t.Run("Create and Get Event", func(t *testing.T) {
 		eventID := "test-event-1"
-		whatsappMsgID := "whatsapp-123"
 
 		err := queries.InsertEvent(ctx, database.InsertEventParams{
-			ID:                eventID,
-			WhatsappMessageID: pgtype.Text{String: whatsappMsgID, Valid: true},
-			FromNumber:        pgtype.Text{String: "+1234567890", Valid: true},
-			Command:           pgtype.Text{String: "resize_image", Valid: true},
-			Payload:           `{"image":"test.jpg"}`,
-			Status:            pgtype.Text{String: "pending", Valid: true},
-			CreatedAt:         pgtype.Timestamp{Time: time.Now(), Valid: true},
-			UpdatedAt:         pgtype.Timestamp{Time: time.Now(), Valid: true},
+			ID:        eventID,
+			Payload:   `{"image":"test.jpg"}`,
+			Status:    pgtype.Text{String: "pending", Valid: true},
+			CreatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
+			UpdatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
 		})
 		require.NoError(t, err)
 
@@ -40,15 +36,6 @@ func TestEventRepositoryWithSqlc(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, eventID, event.ID)
-		assert.Equal(t, whatsappMsgID, event.WhatsappMessageID)
-		assert.Equal(t, "resize_image", event.Command)
-	})
-
-	t.Run("Get non-existent event", func(t *testing.T) {
-		_, err := queries.GetEventByWhatsappMessageID(ctx, pgtype.Text{String: "non-existent", Valid: true})
-		assert.Error(t, err)
-		// pgx returns pgx.ErrNoRows for not found
-		assert.ErrorIs(t, err, pgx.ErrNoRows)
 	})
 
 	t.Run("Update Event Status", func(t *testing.T) {
@@ -71,24 +58,6 @@ func TestEventRepositoryWithSqlc(t *testing.T) {
 		event, err := queries.GetEventByID(ctx, eventID)
 		require.NoError(t, err)
 		assert.Equal(t, "processing", event.Status)
-	})
-
-	t.Run("GetEventByWhatsappMessageID", func(t *testing.T) {
-		eventID := "test-event-3"
-		whatsappMsgID := "whatsapp-unique-123"
-
-		err := queries.InsertEvent(ctx, database.InsertEventParams{
-			ID:                eventID,
-			WhatsappMessageID: pgtype.Text{String: whatsappMsgID, Valid: true},
-			Payload:           `{}`,
-			CreatedAt:         pgtype.Timestamp{Time: time.Now(), Valid: true},
-			UpdatedAt:         pgtype.Timestamp{Time: time.Now(), Valid: true},
-		})
-		require.NoError(t, err)
-
-		event, err := queries.GetEventByWhatsappMessageID(ctx, pgtype.Text{String: whatsappMsgID, Valid: true})
-		require.NoError(t, err)
-		assert.Equal(t, eventID, event.ID)
 	})
 
 	t.Run("CreateDeliveryLog", func(t *testing.T) {

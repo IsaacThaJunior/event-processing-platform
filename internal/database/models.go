@@ -9,15 +9,13 @@ import (
 )
 
 type Event struct {
-	ID                string
-	Type              string
-	Payload           string
-	CreatedAt         pgtype.Timestamp
-	WhatsappMessageID pgtype.Text
-	FromNumber        pgtype.Text
-	Command           pgtype.Text
-	Status            pgtype.Text
-	UpdatedAt         pgtype.Timestamp
+	ID        string
+	Type      string
+	Payload   string
+	CreatedAt pgtype.Timestamp
+	Status    pgtype.Text
+	UpdatedAt pgtype.Timestamp
+	TraceID   pgtype.Text
 }
 
 type EventDeliveryLog struct {

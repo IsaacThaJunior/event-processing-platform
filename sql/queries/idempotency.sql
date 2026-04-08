@@ -1,6 +1,6 @@
--- name: CreateIdempotencyKey :exec
+-- name: CreateIdempotencyKey :execrows
 INSERT INTO idempotency_keys (key, event_id, expires_at, metadata)
-VALUES ($1, $2, $3, $4);
+VALUES ($1, $2, $3, $4) ON CONFLICT (key) DO NOTHING;
 -- name: GetIdempotencyKey :one
 SELECT *
 FROM idempotency_keys

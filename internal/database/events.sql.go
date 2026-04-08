@@ -12,7 +12,7 @@ import (
 )
 
 const getEventByID = `-- name: GetEventByID :one
-SELECT id, type, payload, created_at, whatsapp_message_id, from_number, command, status, updated_at
+SELECT id, type, payload, created_at, status, updated_at, trace_id
 FROM events
 WHERE id = $1
 `
@@ -25,34 +25,9 @@ func (q *Queries) GetEventByID(ctx context.Context, id string) (Event, error) {
 		&i.Type,
 		&i.Payload,
 		&i.CreatedAt,
-		&i.WhatsappMessageID,
-		&i.FromNumber,
-		&i.Command,
 		&i.Status,
 		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getEventByWhatsappMessageID = `-- name: GetEventByWhatsappMessageID :one
-SELECT id, type, payload, created_at, whatsapp_message_id, from_number, command, status, updated_at
-FROM events
-WHERE whatsapp_message_id = $1
-`
-
-func (q *Queries) GetEventByWhatsappMessageID(ctx context.Context, whatsappMessageID pgtype.Text) (Event, error) {
-	row := q.db.QueryRow(ctx, getEventByWhatsappMessageID, whatsappMessageID)
-	var i Event
-	err := row.Scan(
-		&i.ID,
-		&i.Type,
-		&i.Payload,
-		&i.CreatedAt,
-		&i.WhatsappMessageID,
-		&i.FromNumber,
-		&i.Command,
-		&i.Status,
-		&i.UpdatedAt,
+		&i.TraceID,
 	)
 	return i, err
 }
@@ -60,47 +35,41 @@ func (q *Queries) GetEventByWhatsappMessageID(ctx context.Context, whatsappMessa
 const insertEvent = `-- name: InsertEvent :exec
 INSERT INTO events (
     id,
-    whatsapp_message_id,
-    from_number,
-    command,
     payload,
     status,
     created_at,
     updated_at,
-    type
+    type,
+    trace_id
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 `
 
 type InsertEventParams struct {
-	ID                string
-	WhatsappMessageID pgtype.Text
-	FromNumber        pgtype.Text
-	Command           pgtype.Text
-	Payload           string
-	Status            pgtype.Text
-	CreatedAt         pgtype.Timestamp
-	UpdatedAt         pgtype.Timestamp
-	Type              string
+	ID        string
+	Payload   string
+	Status    pgtype.Text
+	CreatedAt pgtype.Timestamp
+	UpdatedAt pgtype.Timestamp
+	Type      string
+	TraceID   pgtype.Text
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error {
 	_, err := q.db.Exec(ctx, insertEvent,
 		arg.ID,
-		arg.WhatsappMessageID,
-		arg.FromNumber,
-		arg.Command,
 		arg.Payload,
 		arg.Status,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.Type,
+		arg.TraceID,
 	)
 	return err
 }
 
 const listEvents = `-- name: ListEvents :many
-SELECT id, type, payload, created_at, whatsapp_message_id, from_number, command, status, updated_at
+SELECT id, type, payload, created_at, status, updated_at, trace_id
 FROM events
 ORDER BY created_at ASC
 `
@@ -119,11 +88,9 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 			&i.Type,
 			&i.Payload,
 			&i.CreatedAt,
-			&i.WhatsappMessageID,
-			&i.FromNumber,
-			&i.Command,
 			&i.Status,
 			&i.UpdatedAt,
+			&i.TraceID,
 		); err != nil {
 			return nil, err
 		}

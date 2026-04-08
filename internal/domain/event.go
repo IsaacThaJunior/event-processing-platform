@@ -4,8 +4,6 @@ package domain
 // WhatsAppEvent represents the full data from a WhatsApp message
 type WhatsAppEvent struct {
 	ID                string `json:"id"`
-	WhatsAppMessageID string `json:"whatsapp_message_id"`
-	FromNumber        string `json:"from_number"`
 	Command           string `json:"command"`
 	Payload           string `json:"payload"`
 	OriginalText      string `json:"original_text"`
