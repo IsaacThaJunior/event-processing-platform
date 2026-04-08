@@ -16,6 +16,7 @@ type Event struct {
 	Status    pgtype.Text
 	UpdatedAt pgtype.Timestamp
 	TraceID   pgtype.Text
+	Priority  pgtype.Text
 }
 
 type EventDeliveryLog struct {

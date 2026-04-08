@@ -9,7 +9,7 @@ import (
 )
 
 type EventRepository interface {
-	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID string) error
+	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority string) error
 	GetEventByID(ctx context.Context, id string) (database.Event, error)
 	ListProcessedEvents(ctx context.Context) ([]database.Event, error)
 	LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error
@@ -24,7 +24,7 @@ func NewEventRepository(q *database.Queries) *SQLCEventRepository {
 	return &SQLCEventRepository{q: q}
 }
 
-func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID string) error {
+func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority string) error {
 
 	return r.q.InsertEvent(ctx, database.InsertEventParams{
 		ID:        id,
@@ -34,6 +34,7 @@ func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventT
 		UpdatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
 		Type:      eventType,
 		TraceID:   pgtype.Text{String: traceID, Valid: traceID != ""},
+		Priority:  pgtype.Text{String: priority, Valid: priority != ""},
 	})
 }
 

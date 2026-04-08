@@ -58,7 +58,7 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		"type", req.Type,
 	)
 
-	key := h.idempotency.GenerateIdempotencyKey(req.Type, string(req.Payload))
+	key := h.idempotency.GenerateIdempotencyKey(req.Type, string(req.Payload), req.Priority)
 
 	processed, existingEventID, err := h.idempotency.Isprocessed(ctx, key)
 	if err != nil {
@@ -77,7 +77,7 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	eventID := uuid.New().String()
 
 	// Save event
-	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(req.Payload), "pending", traceID)
+	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(req.Payload), "pending", traceID, req.Priority)
 	if err != nil {
 		sender.RespondWithError(w, http.StatusInternalServerError, "Failed to save event", err)
 		return

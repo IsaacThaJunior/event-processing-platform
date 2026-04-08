@@ -6,9 +6,10 @@ INSERT INTO events (
     created_at,
     updated_at,
     type,
-    trace_id
+    trace_id,
+    priority
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 -- name: GetEventByID :one
 SELECT *
 FROM events

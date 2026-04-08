@@ -56,15 +56,6 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("/test-process", func(w http.ResponseWriter, r *http.Request) {
-		metrics.TasksProcessed.WithLabelValues("test").Inc()
-		metrics.TasksProcessed.WithLabelValues("email").Inc()
-		metrics.TasksProcessed.WithLabelValues("payment").Inc()
-		metrics.TasksRetried.WithLabelValues("test").Inc()
-		metrics.TasksFailed.WithLabelValues("test").Inc()
-
-		w.Write([]byte("Test metrics incremented!\n"))
-	})
 
 	mux.HandleFunc("POST /tasks", taskHandler.HandleCreateTask)
 
