@@ -12,7 +12,7 @@ import (
 )
 
 const getDeliveryLogsForEvent = `-- name: GetDeliveryLogsForEvent :many
-SELECT id, event_id, status, attempt, error_message, created_at
+SELECT event_id, status, attempt, error_message, created_at, updated_at
 FROM event_delivery_logs
 WHERE event_id = $1
 ORDER BY attempt ASC
@@ -28,12 +28,12 @@ func (q *Queries) GetDeliveryLogsForEvent(ctx context.Context, eventID string) (
 	for rows.Next() {
 		var i EventDeliveryLog
 		if err := rows.Scan(
-			&i.ID,
 			&i.EventID,
 			&i.Status,
 			&i.Attempt,
 			&i.ErrorMessage,
 			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -45,26 +45,35 @@ func (q *Queries) GetDeliveryLogsForEvent(ctx context.Context, eventID string) (
 	return items, nil
 }
 
-const insertDeliveryLog = `-- name: InsertDeliveryLog :exec
+const upsertDeliveryLog = `-- name: UpsertDeliveryLog :exec
 INSERT INTO event_delivery_logs (
     event_id,
     status,
     attempt,
-    error_message
-) VALUES (
-    $1, $2, $3, $4
+    error_message,
+    created_at,
+    updated_at
 )
+VALUES (
+    $1, $2, $3, $4, NOW(), NOW()
+)
+ON CONFLICT (event_id)
+DO UPDATE SET
+    status = EXCLUDED.status,
+    attempt = EXCLUDED.attempt,
+    error_message = EXCLUDED.error_message,
+    updated_at = NOW()
 `
 
-type InsertDeliveryLogParams struct {
+type UpsertDeliveryLogParams struct {
 	EventID      string
 	Status       string
 	Attempt      int32
 	ErrorMessage pgtype.Text
 }
 
-func (q *Queries) InsertDeliveryLog(ctx context.Context, arg InsertDeliveryLogParams) error {
-	_, err := q.db.Exec(ctx, insertDeliveryLog,
+func (q *Queries) UpsertDeliveryLog(ctx context.Context, arg UpsertDeliveryLogParams) error {
+	_, err := q.db.Exec(ctx, upsertDeliveryLog,
 		arg.EventID,
 		arg.Status,
 		arg.Attempt,

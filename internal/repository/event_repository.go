@@ -9,7 +9,7 @@ import (
 )
 
 type EventRepository interface {
-	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority string) error
+	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id, root_id string) error
 	GetEventByID(ctx context.Context, id string) (database.Event, error)
 	ListProcessedEvents(ctx context.Context) ([]database.Event, error)
 	LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error
@@ -24,7 +24,7 @@ func NewEventRepository(q *database.Queries) *SQLCEventRepository {
 	return &SQLCEventRepository{q: q}
 }
 
-func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority string) error {
+func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id, root_id string) error {
 
 	return r.q.InsertEvent(ctx, database.InsertEventParams{
 		ID:        id,
@@ -33,8 +33,10 @@ func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventT
 		CreatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
 		UpdatedAt: pgtype.Timestamp{Time: time.Now(), Valid: true},
 		Type:      eventType,
-		TraceID:   pgtype.Text{String: traceID, Valid: traceID != ""},
+		TraceID:   traceID,
 		Priority:  pgtype.Text{String: priority, Valid: priority != ""},
+		Parentid:  pgtype.Text{String: parent_id, Valid: parent_id != ""},
+		Rootid:    pgtype.Text{String: root_id, Valid: root_id != ""},
 	})
 }
 
@@ -49,7 +51,7 @@ func (r *SQLCEventRepository) ListProcessedEvents(ctx context.Context) ([]databa
 }
 
 func (r *SQLCEventRepository) LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error {
-	return r.q.InsertDeliveryLog(ctx, database.InsertDeliveryLogParams{
+	return r.q.UpsertDeliveryLog(ctx, database.UpsertDeliveryLogParams{
 		EventID:      id,
 		Status:       status,
 		Attempt:      int32(attempt),

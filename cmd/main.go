@@ -40,16 +40,17 @@ func main() {
 
 	// This is for Redis queue
 	queue := repository.NewRedisQueue(redisClient, "events_queue")
+	validator := service.NewTaskValidator()
 
 	// --- Worker pool ---
-	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger)
+	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger, validator)
 	workerPool.Start()
 	defer workerPool.Stop()
 
 	metrics.Init()
 
 	// Task handler
-	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, logger)
+	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, logger, validator)
 
 	mux := http.NewServeMux()
 

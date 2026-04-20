@@ -20,20 +20,25 @@ type TaskHandler struct {
 	eventRepo   repository.EventRepository
 	idempotency *service.IdempotencyRepo
 	logger      *slog.Logger
+	validator   *service.TaskValidator
 }
 
 type TaskRequest struct {
-	Type     string          `json:"type"`
-	Payload  json.RawMessage `json:"payload"`
-	Priority string          `json:"priority"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+	Priority  string          `json:"priority"`
+	ExecuteAt *time.Time      `json:"execute_at,omitempty"`
+
+	Next *TaskRequest `json:"next,omitempty"`
 }
 
-func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, logger *slog.Logger) *TaskHandler {
+func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, logger *slog.Logger, validator *service.TaskValidator) *TaskHandler {
 	return &TaskHandler{
 		queue:       queue,
 		eventRepo:   eventRepo,
 		idempotency: id,
 		logger:      logger,
+		validator:   validator,
 	}
 }
 
@@ -50,6 +55,15 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	if req.Type == "" {
 		sender.RespondWithError(w, http.StatusBadRequest, "Type Required", errors.New("Type Required"))
+		return
+	}
+
+	if err := h.validator.Validate(req.Type, req.Payload); err != nil {
+		sender.RespondWithError(w, http.StatusBadRequest, "Invalid payload", err)
+		return
+	}
+	if err := h.validator.Validate(req.Next.Type, req.Next.Payload); err != nil {
+		sender.RespondWithError(w, http.StatusBadRequest, "Invalid next task payload", err)
 		return
 	}
 
@@ -75,9 +89,11 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventID := uuid.New().String()
+	cleanTask := StripNext(&req)
+	payloadBytes, _ := json.Marshal(cleanTask)
 
 	// Save event
-	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(req.Payload), "pending", traceID, req.Priority)
+	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(payloadBytes), "pending", traceID, req.Priority, "", eventID)
 	if err != nil {
 		sender.RespondWithError(w, http.StatusInternalServerError, "Failed to save event", err)
 		return
@@ -96,10 +112,19 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enqueue
-	if err := h.queue.Enqueue(eventID); err != nil {
-		h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
-		sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue to Redis", err)
-		return
+	if req.ExecuteAt != nil {
+		if err := h.queue.Schedule(eventID, req.Priority, *req.ExecuteAt); err != nil {
+			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
+			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue to Redis", err)
+			return
+		}
+
+	} else {
+		if err := h.queue.EnqueueWithPriority(eventID, req.Priority); err != nil {
+			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
+			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue to Redis", err)
+			return
+		}
 	}
 
 	// Send Success

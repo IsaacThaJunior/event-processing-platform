@@ -7,9 +7,12 @@ INSERT INTO events (
     updated_at,
     type,
     trace_id,
-    priority
+    priority,
+    rootID,
+    parentID
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING *;
 -- name: GetEventByID :one
 SELECT *
 FROM events

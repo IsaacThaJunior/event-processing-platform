@@ -1,7 +1,13 @@
 package domain
 
+import (
+	"time"
+)
+
 type Queue interface {
-	Enqueue(taskID string) error
-	Dequeue() (string, error)
+	EnqueueWithPriority(taskID, priority string) error
+	DequeuePriorityBlocking(timeout time.Duration) (string, string, error)
+	Schedule(taskID, priority string, executeAt time.Time) error
+	PromoteScheduled() error
 	EnqueueToDLQ(taskID string) error
 }

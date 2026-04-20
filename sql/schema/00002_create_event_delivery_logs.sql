@@ -1,11 +1,11 @@
 -- +goose UP
 CREATE TABLE event_delivery_logs (
-    id SERIAL PRIMARY KEY,
-    event_id TEXT NOT NULL,
-    status TEXT NOT NULL,        -- processed | retry | failed
-    attempt INTEGER NOT NULL,
+    event_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
     error_message TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 -- +goose DOWN

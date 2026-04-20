@@ -71,7 +71,7 @@ func TestEventRepositoryWithSqlc(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = queries.InsertDeliveryLog(ctx, database.InsertDeliveryLogParams{
+		err = queries.UpsertDeliveryLog(ctx, database.UpsertDeliveryLogParams{
 			EventID:      eventID,
 			Status:       "processed",
 			Attempt:      1,

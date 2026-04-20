@@ -1,25 +1,27 @@
-# -------- Build Stage --------
-FROM golang:1.22-alpine AS builder
+# Dockerfile.dev (development)
+FROM golang:1.25-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache git
+# Install git and bash
+RUN apk add --no-cache git bash
 
-COPY go.sum ./
+# Add Go bin to PATH
+ENV PATH=$PATH:/go/bin
+
+# Install Air
+RUN go install github.com/air-verse/air@latest
+
+# Copy go.mod and go.sum, download deps
 COPY go.mod ./
+COPY go.sum ./
 RUN go mod download
 
+# Copy all source code
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o app ./cmd
-
-# -------- Run Stage --------
-FROM alpine:latest
-
-WORKDIR /app
-
-COPY --from=builder /app/app .
-
+# Expose port
 EXPOSE 8080
 
-CMD ["./app"]
+# Run Air for hot reload
+CMD ["air", "-c", ".air.toml"]

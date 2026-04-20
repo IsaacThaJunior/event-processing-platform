@@ -15,17 +15,19 @@ type Event struct {
 	CreatedAt pgtype.Timestamp
 	Status    pgtype.Text
 	UpdatedAt pgtype.Timestamp
-	TraceID   pgtype.Text
+	TraceID   string
 	Priority  pgtype.Text
+	Parentid  pgtype.Text
+	Rootid    pgtype.Text
 }
 
 type EventDeliveryLog struct {
-	ID           int32
 	EventID      string
 	Status       string
 	Attempt      int32
 	ErrorMessage pgtype.Text
 	CreatedAt    pgtype.Timestamp
+	UpdatedAt    pgtype.Timestamp
 }
 
 type IdempotencyKey struct {

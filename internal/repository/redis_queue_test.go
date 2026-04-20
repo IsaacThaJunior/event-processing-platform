@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	testutil "github.com/isaacthajunior/mid-prod/internal/testutils"
 	"github.com/stretchr/testify/assert"
@@ -20,17 +21,17 @@ func TestRedisQueue(t *testing.T) {
 	t.Run("Enqueue and Dequeue", func(t *testing.T) {
 		client.Del(ctx, "test_queue")
 
-		err := queue.Enqueue("task1")
+		err := queue.EnqueueWithPriority("task1", "high")
 		require.NoError(t, err)
 
-		err = queue.Enqueue("task2")
+		err = queue.EnqueueWithPriority("task2", "low")
 		require.NoError(t, err)
 
-		task, err := queue.Dequeue()
+		task, _, err := queue.DequeuePriorityBlocking(5 * time.Second)
 		require.NoError(t, err)
 		assert.Equal(t, "task1", task)
 
-		task, err = queue.Dequeue()
+		task, _, err = queue.DequeuePriorityBlocking(5 * time.Second)
 		require.NoError(t, err)
 		assert.Equal(t, "task2", task)
 	})
@@ -39,7 +40,7 @@ func TestRedisQueue(t *testing.T) {
 		client.Del(ctx, "empty_queue")
 		emptyQueue := NewRedisQueue(client, "empty_queue")
 
-		task, err := emptyQueue.Dequeue()
+		task, _, err := emptyQueue.DequeuePriorityBlocking(5 * time.Second)
 		require.NoError(t, err)
 		assert.Equal(t, "", task)
 	})
@@ -64,8 +65,8 @@ func TestRedisQueue(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), depth)
 
-		depthQueue.Enqueue("task1")
-		depthQueue.Enqueue("task2")
+		depthQueue.EnqueueWithPriority("task1", "high")
+		depthQueue.EnqueueWithPriority("task2", "low")
 
 		depth, err = depthQueue.Depth()
 		require.NoError(t, err)
@@ -84,7 +85,7 @@ func TestRedisQueue(t *testing.T) {
 			wg.Add(1)
 			go func(id int) {
 				defer wg.Done()
-				err := concurrentQueue.Enqueue(string(rune(id)))
+				err := concurrentQueue.EnqueueWithPriority(string(rune(id)), "medium")
 				assert.NoError(t, err)
 			}(i)
 		}

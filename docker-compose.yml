@@ -2,12 +2,14 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile   # production Dockerfile
+      dockerfile: Dockerfile  
     container_name: event-app
     ports:
       - "8080:8080"
     env_file:
       - .env
+    volumes:
+      - .:/app   # Mount local source for live reload
     depends_on:
       - postgres
       - redis
@@ -32,5 +34,25 @@ services:
     ports:
       - "6379:6379"
 
+
+  prometheus:
+    image: prom/prometheus
+    container_name: event-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana
+    container_name: event-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
+  grafana_data:

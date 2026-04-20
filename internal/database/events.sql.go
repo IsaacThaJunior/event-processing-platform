@@ -12,7 +12,7 @@ import (
 )
 
 const getEventByID = `-- name: GetEventByID :one
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, rootid
 FROM events
 WHERE id = $1
 `
@@ -29,6 +29,8 @@ func (q *Queries) GetEventByID(ctx context.Context, id string) (Event, error) {
 		&i.UpdatedAt,
 		&i.TraceID,
 		&i.Priority,
+		&i.Parentid,
+		&i.Rootid,
 	)
 	return i, err
 }
@@ -42,9 +44,12 @@ INSERT INTO events (
     updated_at,
     type,
     trace_id,
-    priority
+    priority,
+    rootID,
+    parentID
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, rootid
 `
 
 type InsertEventParams struct {
@@ -54,8 +59,10 @@ type InsertEventParams struct {
 	CreatedAt pgtype.Timestamp
 	UpdatedAt pgtype.Timestamp
 	Type      string
-	TraceID   pgtype.Text
+	TraceID   string
 	Priority  pgtype.Text
+	Rootid    pgtype.Text
+	Parentid  pgtype.Text
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error {
@@ -68,12 +75,14 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.Type,
 		arg.TraceID,
 		arg.Priority,
+		arg.Rootid,
+		arg.Parentid,
 	)
 	return err
 }
 
 const listEvents = `-- name: ListEvents :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, rootid
 FROM events
 ORDER BY created_at ASC
 `
@@ -96,6 +105,8 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 			&i.UpdatedAt,
 			&i.TraceID,
 			&i.Priority,
+			&i.Parentid,
+			&i.Rootid,
 		); err != nil {
 			return nil, err
 		}

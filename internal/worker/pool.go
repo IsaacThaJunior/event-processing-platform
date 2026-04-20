@@ -9,20 +9,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/domain"
+	"github.com/isaacthajunior/mid-prod/internal/handler"
 	"github.com/isaacthajunior/mid-prod/internal/metrics"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
+	"github.com/isaacthajunior/mid-prod/internal/service"
 )
 
 type WorkerPool struct {
-	queue   domain.Queue
-	repo    repository.EventRepository
-	workers int
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	logger  *slog.Logger
+	queue     domain.Queue
+	repo      repository.EventRepository
+	workers   int
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	logger    *slog.Logger
+	validator *service.TaskValidator
 }
 
 func NewWorkerPool(
@@ -30,15 +34,17 @@ func NewWorkerPool(
 	eventRepo repository.EventRepository,
 	workerCount int,
 	logger *slog.Logger,
+	validator *service.TaskValidator,
 ) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerPool{
-		queue:   queue,
-		repo:    eventRepo,
-		workers: workerCount,
-		ctx:     ctx,
-		cancel:  cancel,
-		logger:  logger,
+		queue:     queue,
+		repo:      eventRepo,
+		workers:   workerCount,
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    logger,
+		validator: validator,
 	}
 }
 
@@ -56,20 +62,27 @@ func (p *WorkerPool) worker(id int) {
 	for {
 		select {
 		case <-p.ctx.Done():
-			fmt.Printf("Worker %d stopping\n", id)
+			p.logger.Info("Worker %d stopping\n", "id", id)
 			return
 		default:
-			// Dequeue returns the event ID (not JSON anymore)
-			eventID, err := p.queue.Dequeue()
+			// promote schedules tasks
+			if err := p.queue.PromoteScheduled(); err != nil {
+				p.logger.Error("Failed to promote scheduled tasks", "error", err)
+			}
+			eventID, queueName, err := p.queue.DequeuePriorityBlocking(5 * time.Second)
 			if err != nil {
-				fmt.Println("Dequeue error:", err)
-				time.Sleep(1 * time.Second)
+				p.logger.Error("failed to dequeue", "error", err)
 				continue
 			}
+
 			if eventID == "" {
-				time.Sleep(500 * time.Millisecond)
 				continue
 			}
+
+			p.logger.Info("task dequeued",
+				"event_id", eventID,
+				"queue", queueName,
+			)
 
 			fmt.Printf("Worker %d processing task: %s\n", id, eventID)
 			p.processWithRetry(eventID, id)
@@ -87,6 +100,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 	baseDelay := time.Second
 
 	var lastEvent database.Event
+	var task handler.TaskRequest
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		ctx := context.Background()
@@ -104,11 +118,15 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 			continue
 		}
 
+		if err := json.Unmarshal([]byte(event.Payload), &task); err != nil {
+			p.logger.Error("An error occured while marshalling this event", "event_id", eventID)
+		}
+
 		lastEvent = event
 
 		// Execute the actual job based on command
 		start := time.Now()
-		err = p.executeJob(ctx, event)
+		err = p.executeTask(ctx, task)
 		duration := time.Since(start).Seconds()
 		metrics.TaskDuration.Observe(duration)
 
@@ -124,6 +142,12 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 			_ = p.repo.UpdateEventStatus(ctx, eventID, "processed")
 			metrics.TasksProcessed.WithLabelValues(event.Type).Inc()
 			_ = p.repo.LogDeliveryStatus(ctx, eventID, "processed", attempt, "")
+
+			if task.Next != nil {
+				if err := p.enqueueNextTask(ctx, event, task.Next, event.TraceID); err != nil {
+					p.logger.Error("failed to enqueue next task", "error", err)
+				}
+			}
 			return
 		}
 
@@ -153,29 +177,29 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 	)
 }
 
-func (p *WorkerPool) executeJob(ctx context.Context, event database.Event) error {
+func (p *WorkerPool) executeTask(ctx context.Context, task handler.TaskRequest) error {
 	// Route to the appropriate job handler based on command
 
-	switch event.Type {
+	switch task.Type {
 	case "resize_image":
-		return p.handleResizeImage(ctx, event)
+		return p.handleResizeImage(ctx, task.Payload)
 	case "scrape_url":
-		return p.handleScrapeURL(ctx, event)
+		return p.handleScrapeURL(ctx, task.Payload)
 	case "generate_report":
-		return p.handleGenerateReport(ctx, event)
+		return p.handleGenerateReport(ctx, task.Payload)
 	default:
-		return fmt.Errorf("unknown command: %v", event.Type)
+		return fmt.Errorf("unknown command: %v", task.Type)
 	}
 }
 
-func (p *WorkerPool) handleResizeImage(ctx context.Context, event database.Event) error {
+func (p *WorkerPool) handleResizeImage(ctx context.Context, payload []byte) error {
 	// Parse payload
 	var params struct {
 		ImageURL string `json:"image_url"`
 		Width    int    `json:"width"`
 		Height   int    `json:"height"`
 	}
-	if err := json.Unmarshal([]byte(event.Payload), &params); err != nil {
+	if err := json.Unmarshal([]byte(payload), &params); err != nil {
 		return fmt.Errorf("failed to parse resize params: %w", err)
 	}
 
@@ -193,11 +217,11 @@ func (p *WorkerPool) handleResizeImage(ctx context.Context, event database.Event
 	return nil
 }
 
-func (p *WorkerPool) handleScrapeURL(ctx context.Context, event database.Event) error {
+func (p *WorkerPool) handleScrapeURL(ctx context.Context, payload []byte) error {
 	var params struct {
 		URL string `json:"url"`
 	}
-	if err := json.Unmarshal([]byte(event.Payload), &params); err != nil {
+	if err := json.Unmarshal([]byte(payload), &params); err != nil {
 		return fmt.Errorf("failed to parse scrape params: %w", err)
 	}
 
@@ -212,11 +236,11 @@ func (p *WorkerPool) handleScrapeURL(ctx context.Context, event database.Event) 
 	return nil
 }
 
-func (p *WorkerPool) handleGenerateReport(ctx context.Context, event database.Event) error {
+func (p *WorkerPool) handleGenerateReport(ctx context.Context, payload []byte) error {
 	var params struct {
 		Date string `json:"date"`
 	}
-	if err := json.Unmarshal([]byte(event.Payload), &params); err != nil {
+	if err := json.Unmarshal([]byte(payload), &params); err != nil {
 		return fmt.Errorf("failed to parse report params: %w", err)
 	}
 
@@ -225,4 +249,46 @@ func (p *WorkerPool) handleGenerateReport(ctx context.Context, event database.Ev
 	// TODO: Implement actual report generation logic here
 
 	return nil
+}
+
+func (p *WorkerPool) enqueueNextTask(
+	ctx context.Context,
+	parent database.Event,
+	next *handler.TaskRequest,
+	traceID string,
+) error {
+
+	nextEventID := uuid.New().String()
+
+	// strip next from child before saving
+	clean := *next
+	clean.Next = nil
+
+	payloadBytes, _ := json.Marshal(clean)
+
+	rootID := parent.ID
+	if parent.Rootid.Valid {
+		rootID = parent.Rootid.String
+	}
+
+	err := p.repo.SaveProcessedEvent(
+		ctx,
+		nextEventID,
+		next.Type,
+		string(payloadBytes),
+		"pending",
+		traceID,
+		next.Priority,
+		parent.ID,
+		rootID,
+	)
+	if err != nil {
+		return err
+	}
+
+	if next.ExecuteAt != nil {
+		return p.queue.Schedule(nextEventID, next.Priority, *next.ExecuteAt)
+	}
+
+	return p.queue.EnqueueWithPriority(nextEventID, next.Priority)
 }
