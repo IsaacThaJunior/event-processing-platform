@@ -2,18 +2,23 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/jackc/pgx/v5/pgtype"
+	// "github.com/jackc/pgx/v5/pgxpool"
 )
 
+var ErrNotCancellable = errors.New("task cannot be cancelled: not found or not in pending state")
+
 type EventRepository interface {
-	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id, root_id string) error
+	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id string) error
 	GetEventByID(ctx context.Context, id string) (database.Event, error)
 	ListProcessedEvents(ctx context.Context) ([]database.Event, error)
 	LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error
 	UpdateEventStatus(ctx context.Context, id, status string) error
+	CancelTask(ctx context.Context, id string) error
 }
 
 type SQLCEventRepository struct {
@@ -24,7 +29,7 @@ func NewEventRepository(q *database.Queries) *SQLCEventRepository {
 	return &SQLCEventRepository{q: q}
 }
 
-func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id, root_id string) error {
+func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id string) error {
 
 	return r.q.InsertEvent(ctx, database.InsertEventParams{
 		ID:        id,
@@ -36,7 +41,6 @@ func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventT
 		TraceID:   traceID,
 		Priority:  pgtype.Text{String: priority, Valid: priority != ""},
 		Parentid:  pgtype.Text{String: parent_id, Valid: parent_id != ""},
-		Rootid:    pgtype.Text{String: root_id, Valid: root_id != ""},
 	})
 }
 
@@ -64,4 +68,15 @@ func (r *SQLCEventRepository) UpdateEventStatus(ctx context.Context, id, status 
 		ID:     id,
 		Status: pgtype.Text{String: status, Valid: true},
 	})
+}
+
+func (r *SQLCEventRepository) CancelTask(ctx context.Context, id string) error {
+	tag, err := r.q.CancelEventIfPending(ctx, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotCancellable
+	}
+	return nil
 }

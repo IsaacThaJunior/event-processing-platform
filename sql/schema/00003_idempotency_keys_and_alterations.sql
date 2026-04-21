@@ -22,8 +22,7 @@ ALTER TABLE events
 ADD COLUMN IF NOT EXISTS priority TEXT;
 ALTER TABLE events
 ADD COLUMN IF NOT EXISTS parentID TEXT;
-ALTER TABLE events
-ADD COLUMN IF NOT EXISTS rootID TEXT;
+
 -- +goose Down
 -- Drop indexes
 DROP INDEX IF EXISTS idx_idempotency_keys_expires_at;

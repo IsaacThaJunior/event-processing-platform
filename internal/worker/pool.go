@@ -124,6 +124,11 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 
 		lastEvent = event
 
+		if event.Status.String == "cancelled" {
+			p.logger.Info("skipping cancelled task", "event_id", eventID)
+			return
+		}
+
 		// Execute the actual job based on command
 		start := time.Now()
 		err = p.executeTask(ctx, task)
@@ -179,6 +184,8 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 
 func (p *WorkerPool) executeTask(ctx context.Context, task handler.TaskRequest) error {
 	// Route to the appropriate job handler based on command
+
+	p.logger.Info("Logging the task type", "task type", task.Type)
 
 	switch task.Type {
 	case "resize_image":
@@ -260,15 +267,13 @@ func (p *WorkerPool) enqueueNextTask(
 
 	nextEventID := uuid.New().String()
 
-	// strip next from child before saving
-	clean := *next
-	clean.Next = nil
+	payloadBytes, _ := json.Marshal(next)
 
-	payloadBytes, _ := json.Marshal(clean)
-
-	rootID := parent.ID
-	if parent.Rootid.Valid {
-		rootID = parent.Rootid.String
+	// All tasks in a chain share the same parentID (the root/first task).
+	// If this parent was itself a child, its parentID already points to root.
+	rootTaskID := parent.ID
+	if parent.Parentid.Valid && parent.Parentid.String != "" {
+		rootTaskID = parent.Parentid.String
 	}
 
 	err := p.repo.SaveProcessedEvent(
@@ -279,8 +284,7 @@ func (p *WorkerPool) enqueueNextTask(
 		"pending",
 		traceID,
 		next.Priority,
-		parent.ID,
-		rootID,
+		rootTaskID,
 	)
 	if err != nil {
 		return err

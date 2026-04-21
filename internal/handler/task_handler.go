@@ -42,34 +42,85 @@ func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id 
 	}
 }
 
+func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	if id == "" {
+		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		return
+	}
+
+	if err := h.eventRepo.CancelTask(ctx, id); err != nil {
+		sender.RespondWithError(w, http.StatusConflict, err.Error(), err)
+		return
+	}
+
+	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+		"status":   "cancelled",
+		"event_id": id,
+	})
+}
+
 func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	traceID := r.Context().Value(middleware.TraceIDKey).(string)
+	if traceID == "" {
+		traceID = "no-trace-id"
+	}
 
 	var req TaskRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sender.RespondWithError(w, http.StatusBadRequest, "Invalid body", err)
+		sender.RespondWithError(w, http.StatusBadRequest, "invalid body", err)
 		return
 	}
 
+	// -----------------------------
+	// Basic validation
+	// -----------------------------
 	if req.Type == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "Type Required", errors.New("Type Required"))
+		sender.RespondWithError(w, http.StatusBadRequest, "type is required", errors.New("missing type"))
 		return
 	}
 
-	if err := h.validator.Validate(req.Type, req.Payload); err != nil {
-		sender.RespondWithError(w, http.StatusBadRequest, "Invalid payload", err)
+	if len(req.Payload) == 0 {
+		sender.RespondWithError(w, http.StatusBadRequest, "payload is required", errors.New("missing payload"))
 		return
 	}
-	if err := h.validator.Validate(req.Next.Type, req.Next.Payload); err != nil {
-		sender.RespondWithError(w, http.StatusBadRequest, "Invalid next task payload", err)
+
+	if req.Priority == "" {
+		req.Priority = "medium"
+	}
+
+	// -----------------------------
+	// Validate main task
+	// -----------------------------
+	if err := h.validator.Validate(req.Type, req.Payload); err != nil {
+		sender.RespondWithError(w, http.StatusBadRequest, "invalid payload", err)
 		return
+	}
+
+	// -----------------------------
+	// Validate next ONLY if exists
+	// -----------------------------
+	if req.Next != nil {
+		if req.Next.Type == "" {
+			sender.RespondWithError(w, http.StatusBadRequest, "next.type is required", nil)
+			return
+		}
+
+		if len(req.Next.Payload) > 0 {
+			if err := h.validator.Validate(req.Next.Type, req.Next.Payload); err != nil {
+				sender.RespondWithError(w, http.StatusBadRequest, "invalid next payload", err)
+				return
+			}
+		}
 	}
 
 	h.logger.Info("creating task",
 		"trace_id", traceID,
 		"type", req.Type,
+		"priority", req.Priority,
 	)
 
 	key := h.idempotency.GenerateIdempotencyKey(req.Type, string(req.Payload), req.Priority)
@@ -89,11 +140,14 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventID := uuid.New().String()
-	cleanTask := StripNext(&req)
-	payloadBytes, _ := json.Marshal(cleanTask)
 
-	// Save event
-	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(payloadBytes), "pending", traceID, req.Priority, "", eventID)
+	// Save event — marshal the full request so the worker can read Next
+	fullPayload, err := json.Marshal(req)
+	if err != nil {
+		sender.RespondWithError(w, http.StatusInternalServerError, "failed to marshal request", err)
+		return
+	}
+	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(fullPayload), "pending", traceID, req.Priority, "")
 	if err != nil {
 		sender.RespondWithError(w, http.StatusInternalServerError, "Failed to save event", err)
 		return

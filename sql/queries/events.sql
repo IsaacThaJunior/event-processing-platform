@@ -8,10 +8,9 @@ INSERT INTO events (
     type,
     trace_id,
     priority,
-    rootID,
     parentID
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 -- name: GetEventByID :one
 SELECT *
@@ -26,3 +25,9 @@ UPDATE events
 SET status = $2,
   updated_at = NOW()
 WHERE id = $1;
+-- name: CancelEventIfPending :execresult
+UPDATE events
+SET status = 'cancelled',
+  updated_at = NOW()
+WHERE id = $1
+  AND status = 'pending';

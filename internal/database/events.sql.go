@@ -8,11 +8,24 @@ package database
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const cancelEventIfPending = `-- name: CancelEventIfPending :execresult
+UPDATE events
+SET status = 'cancelled',
+  updated_at = NOW()
+WHERE id = $1
+  AND status = 'pending'
+`
+
+func (q *Queries) CancelEventIfPending(ctx context.Context, id string) (pgconn.CommandTag, error) {
+	return q.db.Exec(ctx, cancelEventIfPending, id)
+}
+
 const getEventByID = `-- name: GetEventByID :one
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, rootid
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
 FROM events
 WHERE id = $1
 `
@@ -30,7 +43,6 @@ func (q *Queries) GetEventByID(ctx context.Context, id string) (Event, error) {
 		&i.TraceID,
 		&i.Priority,
 		&i.Parentid,
-		&i.Rootid,
 	)
 	return i, err
 }
@@ -45,11 +57,10 @@ INSERT INTO events (
     type,
     trace_id,
     priority,
-    rootID,
     parentID
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, rootid
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
 `
 
 type InsertEventParams struct {
@@ -61,7 +72,6 @@ type InsertEventParams struct {
 	Type      string
 	TraceID   string
 	Priority  pgtype.Text
-	Rootid    pgtype.Text
 	Parentid  pgtype.Text
 }
 
@@ -75,14 +85,13 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.Type,
 		arg.TraceID,
 		arg.Priority,
-		arg.Rootid,
 		arg.Parentid,
 	)
 	return err
 }
 
 const listEvents = `-- name: ListEvents :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, rootid
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
 FROM events
 ORDER BY created_at ASC
 `
@@ -106,7 +115,6 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 			&i.TraceID,
 			&i.Priority,
 			&i.Parentid,
-			&i.Rootid,
 		); err != nil {
 			return nil, err
 		}

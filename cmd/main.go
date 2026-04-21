@@ -59,6 +59,7 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /tasks", taskHandler.HandleCreateTask)
+	mux.HandleFunc("DELETE /tasks/{id}", taskHandler.HandleCancelTask)
 
 	mux.Handle("/metrics", promhttp.Handler())
 

@@ -18,7 +18,6 @@ type Event struct {
 	TraceID   string
 	Priority  pgtype.Text
 	Parentid  pgtype.Text
-	Rootid    pgtype.Text
 }
 
 type EventDeliveryLog struct {
