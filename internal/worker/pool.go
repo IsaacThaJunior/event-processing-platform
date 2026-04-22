@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,11 @@ type WorkerPool struct {
 	wg        sync.WaitGroup
 	logger    *slog.Logger
 	validator *service.TaskValidator
+
+	activeWorkers  atomic.Int32
+	totalProcessed atomic.Int64
+	totalFailed    atomic.Int64
+	startTime      time.Time
 }
 
 func NewWorkerPool(
@@ -45,6 +51,19 @@ func NewWorkerPool(
 		cancel:    cancel,
 		logger:    logger,
 		validator: validator,
+		startTime: time.Now(),
+	}
+}
+
+func (p *WorkerPool) HealthStats() domain.WorkerHealthStats {
+	active := p.activeWorkers.Load()
+	return domain.WorkerHealthStats{
+		TotalWorkers:   p.workers,
+		ActiveWorkers:  active,
+		IdleWorkers:    int32(p.workers) - active,
+		TotalProcessed: p.totalProcessed.Load(),
+		TotalFailed:    p.totalFailed.Load(),
+		UptimeSeconds:  int64(time.Since(p.startTime).Seconds()),
 	}
 }
 
@@ -96,6 +115,9 @@ func (p *WorkerPool) Stop() {
 }
 
 func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
+	p.activeWorkers.Add(1)
+	defer p.activeWorkers.Add(-1)
+
 	maxRetries := 5
 	baseDelay := time.Second
 
@@ -145,6 +167,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 			)
 
 			_ = p.repo.UpdateEventStatus(ctx, eventID, "processed")
+			p.totalProcessed.Add(1)
 			metrics.TasksProcessed.WithLabelValues(event.Type).Inc()
 			_ = p.repo.LogDeliveryStatus(ctx, eventID, "processed", attempt, "")
 
@@ -173,6 +196,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 
 	// After max retries → Dead Letter Queue
 	fmt.Printf("Task %s moved to DLQ\n", eventID)
+	p.totalFailed.Add(1)
 	metrics.TasksFailed.WithLabelValues(lastEvent.Type).Inc()
 	_ = p.repo.UpdateEventStatus(context.Background(), eventID, "failed")
 	_ = p.repo.LogDeliveryStatus(context.Background(), eventID, "failed", maxRetries, "max retries exceeded")

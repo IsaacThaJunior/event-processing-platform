@@ -52,14 +52,28 @@ func main() {
 	// Task handler
 	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, logger, validator)
 
+	// Admin handler
+	adminRepo := repository.NewAdminRepository(queries)
+	adminHandler := handler.NewAdminHandler(adminRepo, queue, workerPool, logger)
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK"))
 	})
 
+	// Task API
 	mux.HandleFunc("POST /tasks", taskHandler.HandleCreateTask)
 	mux.HandleFunc("DELETE /tasks/{id}", taskHandler.HandleCancelTask)
+
+	// Admin API
+	mux.HandleFunc("GET /api/admin/dashboard/stats", adminHandler.HandleDashboardStats)
+	mux.HandleFunc("GET /api/admin/tasks", adminHandler.HandleListTasks)
+	mux.HandleFunc("GET /api/admin/tasks/{id}", adminHandler.HandleGetTask)
+	mux.HandleFunc("GET /api/admin/tasks/{id}/retries", adminHandler.HandleGetTaskRetries)
+	mux.HandleFunc("POST /api/admin/tasks/{id}/retry", adminHandler.HandleRetryTask)
+	mux.HandleFunc("GET /api/admin/queue/depth", adminHandler.HandleQueueDepth)
+	mux.HandleFunc("GET /api/admin/workers/health", adminHandler.HandleWorkerHealth)
 
 	mux.Handle("/metrics", promhttp.Handler())
 

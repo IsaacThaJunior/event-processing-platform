@@ -10,4 +10,5 @@ type Queue interface {
 	Schedule(taskID, priority string, executeAt time.Time) error
 	PromoteScheduled() error
 	EnqueueToDLQ(taskID string) error
+	GetQueueDepths() (map[string]int64, error)
 }

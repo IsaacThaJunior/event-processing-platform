@@ -105,3 +105,26 @@ func (r *RedisQueue) PromoteScheduled() error {
 func (r *RedisQueue) Depth() (int64, error) {
 	return r.client.LLen(r.ctx, r.key).Result()
 }
+
+func (r *RedisQueue) GetQueueDepths() (map[string]int64, error) {
+	ctx := r.ctx
+	pipe := r.client.Pipeline()
+
+	highCmd := pipe.LLen(ctx, "events_high")
+	medCmd := pipe.LLen(ctx, "events_medium")
+	lowCmd := pipe.LLen(ctx, "events_low")
+	schedCmd := pipe.ZCard(ctx, "scheduled_tasks")
+	dlqCmd := pipe.LLen(ctx, "dead_letter_queue")
+
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get queue depths: %w", err)
+	}
+
+	return map[string]int64{
+		"high":      highCmd.Val(),
+		"medium":    medCmd.Val(),
+		"low":       lowCmd.Val(),
+		"scheduled": schedCmd.Val(),
+		"dlq":       dlqCmd.Val(),
+	}, nil
+}

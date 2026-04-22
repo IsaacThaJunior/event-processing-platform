@@ -24,6 +24,34 @@ func (q *Queries) CancelEventIfPending(ctx context.Context, id string) (pgconn.C
 	return q.db.Exec(ctx, cancelEventIfPending, id)
 }
 
+const countEventsFiltered = `-- name: CountEventsFiltered :one
+SELECT COUNT(*)
+FROM events
+WHERE ($1::text IS NULL OR status = $1)
+  AND ($2::text IS NULL OR type = $2)
+  AND ($3::text IS NULL OR priority = $3)
+  AND ($4::text IS NULL OR type ILIKE '%' || $4 || '%')
+`
+
+type CountEventsFilteredParams struct {
+	Status   pgtype.Text
+	Type     pgtype.Text
+	Priority pgtype.Text
+	Search   pgtype.Text
+}
+
+func (q *Queries) CountEventsFiltered(ctx context.Context, arg CountEventsFilteredParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countEventsFiltered,
+		arg.Status,
+		arg.Type,
+		arg.Priority,
+		arg.Search,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getEventByID = `-- name: GetEventByID :one
 SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
 FROM events
@@ -45,6 +73,52 @@ func (q *Queries) GetEventByID(ctx context.Context, id string) (Event, error) {
 		&i.Parentid,
 	)
 	return i, err
+}
+
+const getEventStatusCounts = `-- name: GetEventStatusCounts :many
+SELECT COALESCE(status, 'unknown') AS status,
+  COUNT(*) AS count
+FROM events
+GROUP BY status
+`
+
+type GetEventStatusCountsRow struct {
+	Status string
+	Count  int64
+}
+
+func (q *Queries) GetEventStatusCounts(ctx context.Context) ([]GetEventStatusCountsRow, error) {
+	rows, err := q.db.Query(ctx, getEventStatusCounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetEventStatusCountsRow
+	for rows.Next() {
+		var i GetEventStatusCountsRow
+		if err := rows.Scan(&i.Status, &i.Count); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getRecentProcessedCount = `-- name: GetRecentProcessedCount :one
+SELECT COUNT(*)
+FROM events
+WHERE status = 'processed'
+  AND updated_at >= NOW() - INTERVAL '24 hours'
+`
+
+func (q *Queries) GetRecentProcessedCount(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, getRecentProcessedCount)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const insertEvent = `-- name: InsertEvent :exec
@@ -124,6 +198,79 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const listEventsFiltered = `-- name: ListEventsFiltered :many
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
+FROM events
+WHERE ($1::text IS NULL OR status = $1)
+  AND ($2::text IS NULL OR type = $2)
+  AND ($3::text IS NULL OR priority = $3)
+  AND ($4::text IS NULL OR type ILIKE '%' || $4 || '%')
+ORDER BY created_at DESC
+LIMIT $6 OFFSET $5
+`
+
+type ListEventsFilteredParams struct {
+	Status   pgtype.Text
+	Type     pgtype.Text
+	Priority pgtype.Text
+	Search   pgtype.Text
+	Offset   int32
+	Limit    int32
+}
+
+func (q *Queries) ListEventsFiltered(ctx context.Context, arg ListEventsFilteredParams) ([]Event, error) {
+	rows, err := q.db.Query(ctx, listEventsFiltered,
+		arg.Status,
+		arg.Type,
+		arg.Priority,
+		arg.Search,
+		arg.Offset,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Event
+	for rows.Next() {
+		var i Event
+		if err := rows.Scan(
+			&i.ID,
+			&i.Type,
+			&i.Payload,
+			&i.CreatedAt,
+			&i.Status,
+			&i.UpdatedAt,
+			&i.TraceID,
+			&i.Priority,
+			&i.Parentid,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const resetTaskForRetry = `-- name: ResetTaskForRetry :one
+UPDATE events
+SET status = 'pending',
+  updated_at = NOW()
+WHERE id = $1
+  AND status IN ('failed', 'cancelled')
+RETURNING priority
+`
+
+func (q *Queries) ResetTaskForRetry(ctx context.Context, id string) (pgtype.Text, error) {
+	row := q.db.QueryRow(ctx, resetTaskForRetry, id)
+	var priority pgtype.Text
+	err := row.Scan(&priority)
+	return priority, err
 }
 
 const updateEventStatus = `-- name: UpdateEventStatus :exec
