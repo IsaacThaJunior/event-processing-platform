@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/domain"
@@ -238,6 +240,148 @@ func (h *AdminHandler) HandleRetryTask(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.queue.EnqueueWithPriority(id, priority); err != nil {
 		sender.RespondWithError(w, http.StatusInternalServerError, "task reset but failed to re-enqueue", err)
+		return
+	}
+
+	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+		"status":   "queued",
+		"event_id": id,
+		"priority": priority,
+	})
+}
+
+// GET /api/admin/dlq
+func (h *AdminHandler) HandleListDLQ(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ids, err := h.queue.GetDLQItems()
+	if err != nil {
+		sender.RespondWithError(w, http.StatusInternalServerError, "failed to list DLQ", err)
+		return
+	}
+
+	tasks := make([]taskResponse, 0, len(ids))
+	for _, id := range ids {
+		event, err := h.adminRepo.GetEventByID(ctx, id)
+		if err != nil {
+			continue
+		}
+		tasks = append(tasks, toTaskResponse(event))
+	}
+
+	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+		"total": len(ids),
+		"tasks": tasks,
+	})
+}
+
+// POST /api/admin/dlq/{id}/retry
+func (h *AdminHandler) HandleRetryDLQTask(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	if id == "" {
+		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		return
+	}
+
+	if err := h.queue.RemoveFromDLQ(id); err != nil {
+		sender.RespondWithError(w, http.StatusNotFound, "task not found in DLQ", err)
+		return
+	}
+
+	priority, err := h.adminRepo.ResetTaskForRetry(ctx, id)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotRetryable) {
+			sender.RespondWithError(w, http.StatusConflict, err.Error(), err)
+			return
+		}
+		sender.RespondWithError(w, http.StatusInternalServerError, "failed to reset task", err)
+		return
+	}
+
+	if err := h.queue.EnqueueWithPriority(id, priority); err != nil {
+		sender.RespondWithError(w, http.StatusInternalServerError, "task reset but failed to re-enqueue", err)
+		return
+	}
+
+	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+		"status":   "queued",
+		"event_id": id,
+		"priority": priority,
+	})
+}
+
+// DELETE /api/admin/dlq/{id}
+func (h *AdminHandler) HandleRemoveDLQTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		return
+	}
+
+	if err := h.queue.RemoveFromDLQ(id); err != nil {
+		sender.RespondWithError(w, http.StatusNotFound, "task not found in DLQ", err)
+		return
+	}
+
+	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+		"status":   "removed",
+		"event_id": id,
+	})
+}
+
+// POST /api/admin/tasks/{id}/requeue — re-enqueues a pending task orphaned from Redis
+func (h *AdminHandler) HandleRequeueTask(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	if id == "" {
+		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		return
+	}
+
+	event, err := h.adminRepo.GetEventByID(ctx, id)
+	if err != nil {
+		sender.RespondWithError(w, http.StatusNotFound, "task not found", err)
+		return
+	}
+
+	if !event.Status.Valid || event.Status.String != "pending" {
+		sender.RespondWithError(w, http.StatusConflict, "only pending tasks can be requeued", nil)
+		return
+	}
+
+	// Parse the stored payload to recover execute_at and priority.
+	var req struct {
+		Priority  string     `json:"priority"`
+		ExecuteAt *time.Time `json:"execute_at"`
+	}
+	_ = json.Unmarshal([]byte(event.Payload), &req)
+
+	priority := req.Priority
+	if priority == "" {
+		if event.Priority.Valid {
+			priority = event.Priority.String
+		} else {
+			priority = "medium"
+		}
+	}
+
+	if req.ExecuteAt != nil && req.ExecuteAt.After(time.Now()) {
+		if err := h.queue.Schedule(id, priority, *req.ExecuteAt); err != nil {
+			sender.RespondWithError(w, http.StatusInternalServerError, "failed to schedule task", err)
+			return
+		}
+		sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+			"status":     "scheduled",
+			"event_id":   id,
+			"priority":   priority,
+			"execute_at": req.ExecuteAt,
+		})
+		return
+	}
+
+	if err := h.queue.EnqueueWithPriority(id, priority); err != nil {
+		sender.RespondWithError(w, http.StatusInternalServerError, "failed to enqueue task", err)
 		return
 	}
 

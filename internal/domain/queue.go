@@ -11,4 +11,6 @@ type Queue interface {
 	PromoteScheduled() error
 	EnqueueToDLQ(taskID string) error
 	GetQueueDepths() (map[string]int64, error)
+	GetDLQItems() ([]string, error)
+	RemoveFromDLQ(taskID string) error
 }

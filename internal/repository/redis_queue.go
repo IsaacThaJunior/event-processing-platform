@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -12,6 +14,11 @@ type RedisQueue struct {
 	client *redis.Client
 	key    string
 	ctx    context.Context
+}
+
+type ScheduledTask struct {
+	TaskID   string `json:"task_id"`
+	Priority string `json:"priority"`
 }
 
 func NewRedisQueue(client *redis.Client, key string) *RedisQueue {
@@ -69,36 +76,63 @@ func (r *RedisQueue) Schedule(
 ) error {
 	score := float64(executeAt.Unix())
 
+	payload, _ := json.Marshal(ScheduledTask{
+		TaskID:   taskID,
+		Priority: priority,
+	})
+
 	return r.client.ZAdd(r.ctx, "scheduled_tasks", redis.Z{
 		Score:  score,
-		Member: fmt.Sprintf("%s|%s", priority, taskID),
+		Member: payload,
 	}).Err()
 }
 
 func (r *RedisQueue) PromoteScheduled() error {
-	now := time.Now().Unix()
+	nowStr := strconv.FormatInt(time.Now().Unix(), 10)
 
-	tasks, err := r.client.ZRangeArgs(r.ctx, redis.ZRangeArgs{
-		Key:     "scheduled_tasks",
-		Start:   "-inf",
-		Stop:    fmt.Sprintf("%d", now),
-		ByScore: true,
+	tasks, err := r.client.ZRangeByScore(r.ctx, "scheduled_tasks", &redis.ZRangeBy{
+		Min: "-inf",
+		Max: nowStr,
 	}).Result()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to query scheduled tasks: %w", err)
+	}
+	if len(tasks) == 0 {
+		return nil
 	}
 
+	pipe := r.client.Pipeline()
 	for _, item := range tasks {
-		var priority, taskID string
-		fmt.Sscanf(item, "%[^|]|%s", &priority, &taskID)
+		var task ScheduledTask
+		json.Unmarshal([]byte(item), &task)
 
-		if err := r.EnqueueWithPriority(taskID, priority); err != nil {
-			return err
-		}
-
-		r.client.ZRem(r.ctx, "scheduled_tasks", item)
+		pipe.LPush(r.ctx, priorityKey(task.Priority), task.TaskID)
+		pipe.ZRem(r.ctx, "scheduled_tasks", item)
 	}
 
+	if _, err := pipe.Exec(r.ctx); err != nil {
+		return fmt.Errorf("failed to promote scheduled tasks: %w", err)
+	}
+
+	return nil
+}
+
+func (r *RedisQueue) GetDLQItems() ([]string, error) {
+	items, err := r.client.LRange(r.ctx, "dead_letter_queue", 0, -1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list DLQ: %w", err)
+	}
+	return items, nil
+}
+
+func (r *RedisQueue) RemoveFromDLQ(taskID string) error {
+	removed, err := r.client.LRem(r.ctx, "dead_letter_queue", 0, taskID).Result()
+	if err != nil {
+		return fmt.Errorf("failed to remove from DLQ: %w", err)
+	}
+	if removed == 0 {
+		return fmt.Errorf("task %s not found in DLQ", taskID)
+	}
 	return nil
 }
 

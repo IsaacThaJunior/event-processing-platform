@@ -88,6 +88,11 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ExecuteAt != nil && req.ExecuteAt.Before(time.Now()) {
+		sender.RespondWithError(w, http.StatusBadRequest, "Executes_at must be in the future", errors.New("Executes at must be in the future"))
+		return
+	}
+
 	if req.Priority == "" {
 		req.Priority = "medium"
 	}
@@ -169,14 +174,14 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if req.ExecuteAt != nil {
 		if err := h.queue.Schedule(eventID, req.Priority, *req.ExecuteAt); err != nil {
 			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
-			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue to Redis", err)
+			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue", err)
 			return
 		}
 
 	} else {
 		if err := h.queue.EnqueueWithPriority(eventID, req.Priority); err != nil {
 			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
-			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue to Redis", err)
+			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue with priority", err)
 			return
 		}
 	}

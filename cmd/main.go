@@ -72,10 +72,14 @@ func main() {
 	mux.HandleFunc("GET /api/admin/tasks/{id}", adminHandler.HandleGetTask)
 	mux.HandleFunc("GET /api/admin/tasks/{id}/retries", adminHandler.HandleGetTaskRetries)
 	mux.HandleFunc("POST /api/admin/tasks/{id}/retry", adminHandler.HandleRetryTask)
+	mux.HandleFunc("POST /api/admin/tasks/{id}/requeue", adminHandler.HandleRequeueTask)
+	mux.HandleFunc("GET /api/admin/dlq", adminHandler.HandleListDLQ)
+	mux.HandleFunc("POST /api/admin/dlq/{id}/retry", adminHandler.HandleRetryDLQTask)
+	mux.HandleFunc("DELETE /api/admin/dlq/{id}", adminHandler.HandleRemoveDLQTask)
 	mux.HandleFunc("GET /api/admin/queue/depth", adminHandler.HandleQueueDepth)
 	mux.HandleFunc("GET /api/admin/workers/health", adminHandler.HandleWorkerHealth)
 
 	mux.Handle("/metrics", promhttp.Handler())
+	http.ListenAndServe(":8080", middleware.EnableCORS(middleware.TraceMiddleware(mux)))
 
-	http.ListenAndServe(":8080", middleware.TraceMiddleware(mux))
 }

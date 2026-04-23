@@ -46,6 +46,9 @@ func (q *benchQueue) PromoteScheduled() error                             { retu
 func (q *benchQueue) EnqueueToDLQ(taskID string) error                    { return nil }
 func (q *benchQueue) GetQueueDepths() (map[string]int64, error)           { return nil, nil }
 
+func (q *benchQueue) GetDLQItems() ([]string, error)    { return nil, nil }
+func (q *benchQueue) RemoveFromDLQ(taskID string) error { return nil }
+
 // --- helpers ---
 
 func newBenchPool(repo repository.EventRepository) *WorkerPool {
