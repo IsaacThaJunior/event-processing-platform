@@ -33,8 +33,6 @@ type IdempotencyRecord struct {
 type IdempotencyMetadata struct {
 	Command   string         `json:"command,omitempty"`
 	Source    string         `json:"source,omitempty"` // whatsapp, api, etc.
-	Timestamp int64          `json:"timestamp,omitempty"`
-	Custom    map[string]any `json:"custom,omitempty"`
 }
 
 func NewIdempotencyService(q *database.Queries, db *pgxpool.Pool) *IdempotencyRepo {
@@ -44,7 +42,7 @@ func NewIdempotencyService(q *database.Queries, db *pgxpool.Pool) *IdempotencyRe
 	}
 }
 
-func (s *IdempotencyRepo) CheckAndRecord(
+func (s *IdempotencyRepo) CheckAndRecordToDB(
 	ctx context.Context,
 	key,
 	eventID string,
@@ -110,21 +108,6 @@ func (s *IdempotencyRepo) Isprocessed(ctx context.Context, key string) (bool, st
 	return true, idempotencyKey.EventID, nil
 }
 
-// GetRecord retrieves the full idempotency record for a key
-func (s *IdempotencyRepo) GetRecord(ctx context.Context, key string) (*IdempotencyRecord, error) {
-	idempotencyKey, err := s.q.GetIdempotencyKey(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get idempotency record: %w", err)
-	}
-
-	return &IdempotencyRecord{
-		Key:       idempotencyKey.Key,
-		EventID:   idempotencyKey.EventID,
-		CreatedAt: idempotencyKey.CreatedAt.Time,
-		ExpiresAt: idempotencyKey.ExpiresAt.Time,
-		Metadata:  []byte(idempotencyKey.Metadata),
-	}, nil
-}
 
 // CleanupExpired removes expired idempotency keys
 func (s *IdempotencyRepo) CleanupExpired(ctx context.Context) (int64, error) {

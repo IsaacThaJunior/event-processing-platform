@@ -7,29 +7,39 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 const logContextKey contextKey = "log_context"
 
 type LogContext struct {
-	Error  error
+	mu       sync.Mutex
+	EventID  string
+	WorkerID *int
+
+	TaskType string
+	Priority string
+	Status   string
+
 	Events []LogEvent
+	Error  error
 }
 
 type LogEvent struct {
 	Step      string `json:"step"`
 	Status    string `json:"status"`
-	Message   string `json:"message,omitempty"`
 	Error     string `json:"error,omitempty"`
 	Timestamp string `json:"timestamp"`
 }
 
 func (l *LogContext) AddEvent(
-	step string,
+	step,
 	status string,
 	err error,
 ) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	event := LogEvent{
 		Step:      step,
 		Status:    status,
@@ -38,7 +48,6 @@ func (l *LogContext) AddEvent(
 
 	if err != nil {
 		event.Error = err.Error()
-		l.Error = err
 	}
 
 	l.Events = append(l.Events, event)
@@ -50,6 +59,14 @@ func GetLogContext(ctx context.Context) *LogContext {
 		return &LogContext{}
 	}
 	return logCtx
+}
+
+func WithLogContext(ctx context.Context) (context.Context, *LogContext) {
+	logCtx := &LogContext{
+		Events: make([]LogEvent, 0),
+	}
+
+	return context.WithValue(ctx, logContextKey, logCtx), logCtx
 }
 
 type spyReadCloser struct {
@@ -121,7 +138,10 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				"request_body_bytes", spyReader.bytesRead,
 				"response_status", spyWriter.statusCode,
 				"response_body_bytes", spyWriter.bytesWritten,
-				"events", logCtx.Events,
+			}
+
+			if len(logCtx.Events) > 0 {
+				attrs = append(attrs, "events", logCtx.Events)
 			}
 
 			if logCtx.Error != nil {
@@ -130,6 +150,22 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 
 			if traceID := r.Header.Get("X-Trace-ID"); traceID != "" {
 				attrs = append(attrs, "trace_id", traceID)
+			}
+
+			if logCtx.Priority != "" {
+				attrs = append(attrs, "priority", logCtx.Priority)
+			}
+			if logCtx.TaskType != "" {
+				attrs = append(attrs, "task_type", logCtx.TaskType)
+			}
+			if logCtx.Status != "" {
+				attrs = append(attrs, "status", logCtx.Status)
+			}
+			if logCtx.WorkerID != nil {
+				attrs = append(attrs, "worker_id", *logCtx.WorkerID)
+			}
+			if logCtx.EventID != "" {
+				attrs = append(attrs, "task_id", logCtx.EventID)
 			}
 
 			// Emit ONE final structured log

@@ -140,7 +140,7 @@ func BenchmarkProcessWithRetry(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		pool.processWithRetry(ids[i], 0)
+		pool.processWithRetry(ids[i], 0, "")
 	}
 }
 
@@ -162,7 +162,7 @@ func BenchmarkProcessWithRetryParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			i := idx.Add(1) % poolSize
-			pool.processWithRetry(ids[i], 0)
+			pool.processWithRetry(ids[i], 0, "")
 		}
 	})
 }

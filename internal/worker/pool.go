@@ -15,6 +15,7 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/handler"
 	"github.com/isaacthajunior/mid-prod/internal/metrics"
+	"github.com/isaacthajunior/mid-prod/internal/middleware"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 )
@@ -88,7 +89,7 @@ func (p *WorkerPool) scheduler() {
 			return
 		case <-ticker.C:
 			if err := p.queue.PromoteScheduled(); err != nil {
-				p.logger.Error("scheduler: failed to promote scheduled tasks", "error", err)
+				p.logger.Debug("scheduler: failed to promote scheduled tasks", "error", err)
 			}
 		}
 	}
@@ -106,7 +107,7 @@ func (p *WorkerPool) worker(id int) {
 		default:
 			eventID, queueName, err := p.queue.DequeuePriorityBlocking(5 * time.Second)
 			if err != nil {
-				p.logger.Info("failed to dequeue", "error", err)
+				p.logger.Debug("failed to dequeue", "error", err)
 				continue
 			}
 
@@ -114,13 +115,7 @@ func (p *WorkerPool) worker(id int) {
 				continue
 			}
 
-			p.logger.Info("task dequeued",
-				"event_id", eventID,
-				"queue", queueName,
-			)
-
-			fmt.Printf("Worker %d processing task: %s\n", id, eventID)
-			p.processWithRetry(eventID, id)
+			p.processWithRetry(eventID, id, queueName)
 		}
 	}
 }
@@ -130,9 +125,40 @@ func (p *WorkerPool) Stop() {
 	p.wg.Wait()
 }
 
-func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
+func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName string) {
 	p.activeWorkers.Add(1)
 	defer p.activeWorkers.Add(-1)
+
+	ctx, logCtx := middleware.WithLogContext(context.Background())
+
+	logCtx.EventID = eventID
+	logCtx.WorkerID = &workerID
+
+	start := time.Now()
+	defer func() {
+		attrs := []any{
+			"task_id", logCtx.EventID,
+			"worker_id", workerID,
+			"queue", queueName,
+			slog.Duration("duration", time.Since(start)),
+		}
+		if logCtx.TaskType != "" {
+			attrs = append(attrs, "task_type", logCtx.TaskType)
+		}
+		if logCtx.Priority != "" {
+			attrs = append(attrs, "priority", logCtx.Priority)
+		}
+		if logCtx.Status != "" {
+			attrs = append(attrs, "status", logCtx.Status)
+		}
+		if len(logCtx.Events) > 0 {
+			attrs = append(attrs, "events", logCtx.Events)
+		}
+		if logCtx.Error != nil {
+			attrs = append(attrs, "error", logCtx.Error)
+		}
+		p.logger.Info("task processed", attrs...)
+	}()
 
 	maxRetries := 5
 	baseDelay := time.Second
@@ -141,99 +167,89 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 	var task handler.TaskRequest
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		ctx := context.Background()
-
-		// Get the event from database to get all metadata
 		event, err := p.repo.GetEventByID(ctx, eventID)
 		if err != nil {
-			p.logger.Error("Failed to get event from DB",
-				"event_id", eventID,
-				"attempt", attempt,
-				"error", err,
-			)
+			logCtx.AddEvent("get_event_from_db", "failed", err)
 			backoff := baseDelay * time.Duration(1<<(attempt-1))
 			time.Sleep(backoff)
 			continue
 		}
 
 		if err := json.Unmarshal([]byte(event.Payload), &task); err != nil {
-			p.logger.Error("An error occured while marshalling this event", "event_id", eventID)
-		}
-
-		lastEvent = event
-
-		if event.Status.String == "cancelled" {
-			p.logger.Info("skipping cancelled task", "event_id", eventID)
+			logCtx.AddEvent("unmarshal_payload", "failed", err)
+			logCtx.Status = "failed"
 			return
 		}
 
-		// Execute the actual job based on command
-		start := time.Now()
+		logCtx.TaskType = event.Type
+		logCtx.Priority = task.Priority
+		lastEvent = event
+
+		if event.Status.String == "cancelled" {
+			logCtx.AddEvent("task_cancelled", "skipped", nil)
+			logCtx.Status = "cancelled"
+			return
+		}
+
+		execStart := time.Now()
 		err = p.executeTask(ctx, task)
-		duration := time.Since(start).Seconds()
-		metrics.TaskDuration.Observe(duration)
+		metrics.TaskDuration.Observe(time.Since(execStart).Seconds())
 
 		if err == nil {
-			p.logger.Info("processing task successful",
-				"worker_id", workerID,
-				"task_id", eventID,
-				"type", event.Type,
-				"trace_id", event.TraceID,
-			)
+			logCtx.AddEvent("execute_task", "success", nil)
 
 			if err := p.repo.UpdateEventStatus(ctx, eventID, "processed"); err != nil {
-				p.logger.Error("failed to update status to processed", "task_id", eventID, "error", err)
+				logCtx.AddEvent("update_status_processed", "failed", err)
 			}
 			p.totalProcessed.Add(1)
 			metrics.TasksProcessed.WithLabelValues(event.Type).Inc()
+
 			if err := p.repo.LogDeliveryStatus(ctx, eventID, "processed", attempt, ""); err != nil {
-				p.logger.Error("failed to log delivery status", "task_id", eventID, "error", err)
+				logCtx.AddEvent("log_delivery_status", "failed", err)
 			}
 
 			if task.Next != nil {
 				if err := p.enqueueNextTask(ctx, event, task.Next, event.TraceID); err != nil {
-					p.logger.Error("failed to enqueue next task", "error", err)
+					logCtx.AddEvent("enqueue_next_task", "failed", err)
+				} else {
+					logCtx.AddEvent("enqueue_next_task", "success", nil)
 				}
 			}
+
+			logCtx.Status = "processed"
 			return
 		}
 
-		// Log retry attempt
-		p.logger.Error("failed to process task",
-			"task_id", eventID,
-			"type", event.Type,
-			"attempt", attempt,
-			"error", err,
-		)
+		logCtx.AddEvent(fmt.Sprintf("execute_task_attempt_%d", attempt), "failed", err)
 		metrics.TasksRetried.WithLabelValues(event.Type).Inc()
 		if err := p.repo.LogDeliveryStatus(ctx, eventID, "retry", attempt, err.Error()); err != nil {
-			p.logger.Error("failed to log retry status", "task_id", eventID, "error", err)
+			logCtx.AddEvent("log_retry_status", "failed", err)
 		}
 
 		backoff := baseDelay * time.Duration(1<<(attempt-1))
-		fmt.Printf("Worker %d retrying task %s in %v\n", workerID, eventID, backoff)
 		time.Sleep(backoff)
 	}
 
 	// After max retries → Dead Letter Queue
 	p.totalFailed.Add(1)
 	metrics.TasksFailed.WithLabelValues(lastEvent.Type).Inc()
-	if err := p.repo.UpdateEventStatus(context.Background(), eventID, "failed"); err != nil {
-		p.logger.Error("failed to update status to failed", "task_id", eventID, "error", err)
+
+	if err := p.repo.UpdateEventStatus(ctx, eventID, "failed"); err != nil {
+		logCtx.AddEvent("update_status_failed", "failed", err)
 	}
-	if err := p.repo.LogDeliveryStatus(context.Background(), eventID, "failed", maxRetries, "max retries exceeded"); err != nil {
-		p.logger.Error("failed to log final failure", "task_id", eventID, "error", err)
+	if err := p.repo.LogDeliveryStatus(ctx, eventID, "failed", maxRetries, "max retries exceeded"); err != nil {
+		logCtx.AddEvent("log_final_failure", "failed", err)
 	}
 	if err := p.queue.EnqueueToDLQ(eventID); err != nil {
-		p.logger.Error("failed to enqueue to DLQ", "task_id", eventID, "error", err)
+		logCtx.AddEvent("enqueue_dlq", "failed", err)
+	} else {
+		logCtx.AddEvent("enqueue_dlq", "success", nil)
 	}
-	p.logger.Info("task moved to DLQ", "task_id", eventID)
+
+	logCtx.Status = "failed"
 }
 
 func (p *WorkerPool) executeTask(ctx context.Context, task handler.TaskRequest) error {
-	// Route to the appropriate job handler based on command
-	p.logger.Info("Logging the task type", "task type", task.Type)
-
 	switch task.Type {
 	case "resize_image":
 		return p.handleResizeImage(ctx, task.Payload)
