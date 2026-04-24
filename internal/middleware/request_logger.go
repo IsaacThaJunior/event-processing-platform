@@ -148,7 +148,7 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				attrs = append(attrs, "error", logCtx.Error)
 			}
 
-			if traceID := r.Header.Get("X-Trace-ID"); traceID != "" {
+			if traceID, ok := r.Context().Value(TraceIDKey).(string); ok && traceID != "" {
 				attrs = append(attrs, "trace_id", traceID)
 			}
 

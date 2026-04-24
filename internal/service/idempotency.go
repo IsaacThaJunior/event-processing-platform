@@ -48,10 +48,6 @@ func (s *IdempotencyRepo) CheckAndRecordToDB(
 	eventID string,
 	metadata *IdempotencyMetadata,
 ) (bool, error) {
-	slog.Info("CheckAndRecord called",
-		"key", key,
-		"event_id", eventID,
-		"metadata", metadata)
 
 	// Prepare metadata JSON
 	metadataJSON := "{}"
@@ -62,7 +58,6 @@ func (s *IdempotencyRepo) CheckAndRecordToDB(
 			return false, fmt.Errorf("failed to marshal metadata: %w", err)
 		}
 		metadataJSON = string(jsonBytes)
-		slog.Info("Metadata marshaled", "metadata", metadataJSON)
 	}
 
 	// Set expiration (30 days from now)
@@ -84,13 +79,6 @@ func (s *IdempotencyRepo) CheckAndRecordToDB(
 	// rowsAffected == 1 means we inserted it (first time - NOT processed before)
 	// rowsAffected == 0 means it already existed (ALREADY processed before)
 	alreadyProcessed := rowsAffected == 0
-
-	if alreadyProcessed {
-		slog.Info("Idempotency key already existed", "key", key, "event_id", eventID)
-	} else {
-		slog.Info("Idempotency key created successfully", "key", key, "event_id", eventID)
-	}
-
 	return alreadyProcessed, nil
 }
 

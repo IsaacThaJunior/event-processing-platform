@@ -73,11 +73,11 @@ func run(ctx context.Context, cancel context.CancelFunc, port int) int {
 	metrics.Init()
 
 	// Task handler
-	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, logger, validator)
+	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, validator)
 
 	// Admin handler
 	adminRepo := repository.NewAdminRepository(queries)
-	adminHandler := handler.NewAdminHandler(adminRepo, queue, workerPool, logger)
+	adminHandler := handler.NewAdminHandler(adminRepo, queue, workerPool)
 
 	s := newServer(adminHandler, taskHandler, cancel, logger, port)
 	var serverErr error

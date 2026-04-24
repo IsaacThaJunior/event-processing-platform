@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -20,20 +19,17 @@ type AdminHandler struct {
 	adminRepo  *repository.AdminRepository
 	queue      domain.Queue
 	workerPool domain.WorkerHealthProvider
-	logger     *slog.Logger
 }
 
 func NewAdminHandler(
 	adminRepo *repository.AdminRepository,
 	queue domain.Queue,
 	workerPool domain.WorkerHealthProvider,
-	logger *slog.Logger,
 ) *AdminHandler {
 	return &AdminHandler{
 		adminRepo:  adminRepo,
 		queue:      queue,
 		workerPool: workerPool,
-		logger:     logger,
 	}
 }
 

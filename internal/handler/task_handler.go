@@ -3,7 +3,6 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -19,7 +18,6 @@ type TaskHandler struct {
 	queue       domain.Queue
 	eventRepo   repository.EventRepository
 	idempotency *service.IdempotencyRepo
-	logger      *slog.Logger
 	validator   *service.TaskValidator
 }
 
@@ -32,12 +30,11 @@ type TaskRequest struct {
 	Next *TaskRequest `json:"next,omitempty"`
 }
 
-func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, logger *slog.Logger, validator *service.TaskValidator) *TaskHandler {
+func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, validator *service.TaskValidator) *TaskHandler {
 	return &TaskHandler{
 		queue:       queue,
 		eventRepo:   eventRepo,
 		idempotency: id,
-		logger:      logger,
 		validator:   validator,
 	}
 }

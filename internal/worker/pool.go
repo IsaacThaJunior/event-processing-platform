@@ -157,7 +157,10 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 		if logCtx.Error != nil {
 			attrs = append(attrs, "error", logCtx.Error)
 		}
-		p.logger.Info("task processed", attrs...)
+		if traceID, ok := ctx.Value(middleware.TraceIDKey).(string); ok {
+			attrs = append(attrs, "trace_id", traceID)
+		}
+		p.logger.Info("task processed successfully", attrs...)
 	}()
 
 	maxRetries := 5
@@ -168,6 +171,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		event, err := p.repo.GetEventByID(ctx, eventID)
+		ctx = context.WithValue(ctx, middleware.TraceIDKey, event.TraceID)
 		if err != nil {
 			logCtx.AddEvent("get_event_from_db", "failed", err)
 			backoff := baseDelay * time.Duration(1<<(attempt-1))
