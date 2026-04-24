@@ -2,7 +2,7 @@ package handler
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -46,12 +46,12 @@ func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if id == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
 	}
 
 	if err := h.eventRepo.CancelTask(ctx, id); err != nil {
-		sender.RespondWithError(w, http.StatusConflict, err.Error(), err)
+		sender.RespondWithError(ctx, w, http.StatusConflict, err)
 		return
 	}
 
@@ -62,7 +62,9 @@ func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
+	// Create the logContext so we can add to it
 	ctx := r.Context()
+	logCtx := middleware.GetLogContext(ctx)
 	traceID := r.Context().Value(middleware.TraceIDKey).(string)
 	if traceID == "" {
 		traceID = "no-trace-id"
@@ -71,7 +73,12 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	var req TaskRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sender.RespondWithError(w, http.StatusBadRequest, "invalid body", err)
+		logCtx.AddEvent(
+			"decode_request_body",
+			"failed",
+			err,
+		)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -79,17 +86,32 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// Basic validation
 	// -----------------------------
 	if req.Type == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "type is required", errors.New("missing type"))
+		logCtx.AddEvent(
+			"request_type_empty",
+			"failed",
+			fmt.Errorf("missing type"),
+		)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("missing type"))
 		return
 	}
 
 	if len(req.Payload) == 0 {
-		sender.RespondWithError(w, http.StatusBadRequest, "payload is required", errors.New("missing payload"))
+		logCtx.AddEvent(
+			"request_payload_empty",
+			"failed",
+			fmt.Errorf("missing payload"),
+		)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("missing payload"))
 		return
 	}
 
 	if req.ExecuteAt != nil && req.ExecuteAt.Before(time.Now()) {
-		sender.RespondWithError(w, http.StatusBadRequest, "Executes_at must be in the future", errors.New("Executes at must be in the future"))
+		logCtx.AddEvent(
+			"past_executes_at_time",
+			"failed",
+			fmt.Errorf("Executes at must be in the future"),
+		)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Executes at must be in the future"))
 		return
 	}
 
@@ -101,7 +123,12 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// Validate main task
 	// -----------------------------
 	if err := h.validator.Validate(req.Type, req.Payload); err != nil {
-		sender.RespondWithError(w, http.StatusBadRequest, "invalid payload", err)
+		logCtx.AddEvent(
+			"type_and_payload_validator",
+			"failed",
+			err,
+		)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -110,13 +137,18 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// -----------------------------
 	if req.Next != nil {
 		if req.Next.Type == "" {
-			sender.RespondWithError(w, http.StatusBadRequest, "next.type is required", nil)
+			logCtx.AddEvent(
+				"next_type_empty",
+				"failed",
+				fmt.Errorf("Next type is empty"),
+			)
+			sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Next type is empty"))
 			return
 		}
 
 		if len(req.Next.Payload) > 0 {
 			if err := h.validator.Validate(req.Next.Type, req.Next.Payload); err != nil {
-				sender.RespondWithError(w, http.StatusBadRequest, "invalid next payload", err)
+				sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 				return
 			}
 		}
@@ -132,7 +164,7 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	processed, existingEventID, err := h.idempotency.Isprocessed(ctx, key)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "idempotency check failed", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -149,12 +181,12 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// Save event — marshal the full request so the worker can read Next
 	fullPayload, err := json.Marshal(req)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to marshal request", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(fullPayload), "pending", traceID, req.Priority, "")
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "Failed to save event", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -166,7 +198,7 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err = h.idempotency.CheckAndRecord(ctx, key, eventID, meta)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "idempotency check and recording failed", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -174,14 +206,14 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if req.ExecuteAt != nil {
 		if err := h.queue.Schedule(eventID, req.Priority, *req.ExecuteAt); err != nil {
 			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
-			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue", err)
+			sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 			return
 		}
 
 	} else {
 		if err := h.queue.EnqueueWithPriority(eventID, req.Priority); err != nil {
 			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
-			sender.RespondWithError(w, http.StatusInternalServerError, "Failed to enqueue with priority", err)
+			sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 			return
 		}
 	}

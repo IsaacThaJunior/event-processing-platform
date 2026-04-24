@@ -6,7 +6,7 @@
   exclude_dir = ["vendor", "tmp"]
 
 [log]
-  time = true
+  main_only = true
 
 [color]
   main = "yellow"

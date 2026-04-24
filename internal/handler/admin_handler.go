@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -88,19 +89,19 @@ func (h *AdminHandler) HandleDashboardStats(w http.ResponseWriter, r *http.Reque
 
 	statusCounts, err := h.adminRepo.GetStatusCounts(ctx)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to get status counts", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
 	recent, err := h.adminRepo.GetRecentProcessedCount(ctx)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to get recent count", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
 	depths, err := h.queue.GetQueueDepths()
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to get queue depths", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -145,7 +146,7 @@ func (h *AdminHandler) HandleListTasks(w http.ResponseWriter, r *http.Request) {
 
 	events, total, err := h.adminRepo.ListEvents(ctx, params)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to list tasks", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -170,13 +171,13 @@ func (h *AdminHandler) HandleGetTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if id == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
 	}
 
 	event, err := h.adminRepo.GetEventByID(ctx, id)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusNotFound, "task not found", err)
+		sender.RespondWithError(ctx, w, http.StatusNotFound, err)
 		return
 	}
 
@@ -188,13 +189,13 @@ func (h *AdminHandler) HandleGetTaskRetries(w http.ResponseWriter, r *http.Reque
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if id == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
 	}
 
 	logs, err := h.adminRepo.GetRetryHistory(ctx, id)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to get retry history", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -224,22 +225,22 @@ func (h *AdminHandler) HandleRetryTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if id == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
 	}
 
 	priority, err := h.adminRepo.ResetTaskForRetry(ctx, id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotRetryable) {
-			sender.RespondWithError(w, http.StatusConflict, err.Error(), err)
+			sender.RespondWithError(ctx, w, http.StatusConflict, err)
 			return
 		}
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to reset task", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
 	if err := h.queue.EnqueueWithPriority(id, priority); err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "task reset but failed to re-enqueue", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -256,7 +257,7 @@ func (h *AdminHandler) HandleListDLQ(w http.ResponseWriter, r *http.Request) {
 
 	ids, err := h.queue.GetDLQItems()
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to list DLQ", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -280,27 +281,27 @@ func (h *AdminHandler) HandleRetryDLQTask(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if id == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
 	}
 
 	if err := h.queue.RemoveFromDLQ(id); err != nil {
-		sender.RespondWithError(w, http.StatusNotFound, "task not found in DLQ", err)
+		sender.RespondWithError(ctx, w, http.StatusNotFound, err)
 		return
 	}
 
 	priority, err := h.adminRepo.ResetTaskForRetry(ctx, id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotRetryable) {
-			sender.RespondWithError(w, http.StatusConflict, err.Error(), err)
+			sender.RespondWithError(ctx, w, http.StatusConflict, err)
 			return
 		}
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to reset task", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
 	if err := h.queue.EnqueueWithPriority(id, priority); err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "task reset but failed to re-enqueue", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -313,14 +314,15 @@ func (h *AdminHandler) HandleRetryDLQTask(w http.ResponseWriter, r *http.Request
 
 // DELETE /api/admin/dlq/{id}
 func (h *AdminHandler) HandleRemoveDLQTask(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	id := r.PathValue("id")
 	if id == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
 	}
 
 	if err := h.queue.RemoveFromDLQ(id); err != nil {
-		sender.RespondWithError(w, http.StatusNotFound, "task not found in DLQ", err)
+		sender.RespondWithError(ctx, w, http.StatusNotFound, err)
 		return
 	}
 
@@ -335,18 +337,18 @@ func (h *AdminHandler) HandleRequeueTask(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	id := r.PathValue("id")
 	if id == "" {
-		sender.RespondWithError(w, http.StatusBadRequest, "task id is required", nil)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
 	}
 
 	event, err := h.adminRepo.GetEventByID(ctx, id)
 	if err != nil {
-		sender.RespondWithError(w, http.StatusNotFound, "task not found", err)
+		sender.RespondWithError(ctx, w, http.StatusNotFound, err)
 		return
 	}
 
 	if !event.Status.Valid || event.Status.String != "pending" {
-		sender.RespondWithError(w, http.StatusConflict, "only pending tasks can be requeued", nil)
+		sender.RespondWithError(ctx, w, http.StatusConflict, fmt.Errorf("only pending tasks can be requeued"))
 		return
 	}
 
@@ -368,7 +370,7 @@ func (h *AdminHandler) HandleRequeueTask(w http.ResponseWriter, r *http.Request)
 
 	if req.ExecuteAt != nil && req.ExecuteAt.After(time.Now()) {
 		if err := h.queue.Schedule(id, priority, *req.ExecuteAt); err != nil {
-			sender.RespondWithError(w, http.StatusInternalServerError, "failed to schedule task", err)
+			sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 			return
 		}
 		sender.RespondWithJSON(w, http.StatusOK, map[string]any{
@@ -381,7 +383,7 @@ func (h *AdminHandler) HandleRequeueTask(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err := h.queue.EnqueueWithPriority(id, priority); err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to enqueue task", err)
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -396,7 +398,7 @@ func (h *AdminHandler) HandleRequeueTask(w http.ResponseWriter, r *http.Request)
 func (h *AdminHandler) HandleQueueDepth(w http.ResponseWriter, r *http.Request) {
 	depths, err := h.queue.GetQueueDepths()
 	if err != nil {
-		sender.RespondWithError(w, http.StatusInternalServerError, "failed to get queue depths", err)
+		sender.RespondWithError(r.Context(), w, http.StatusInternalServerError, err)
 		return
 	}
 	sender.RespondWithJSON(w, http.StatusOK, depths)

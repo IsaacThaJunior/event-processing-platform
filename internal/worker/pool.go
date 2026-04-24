@@ -96,17 +96,17 @@ func (p *WorkerPool) scheduler() {
 
 func (p *WorkerPool) worker(id int) {
 	defer p.wg.Done()
-	p.logger.Info("Worker Started", "worker_id", id)
+	p.logger.Debug("Worker Started", "worker_id", id)
 
 	for {
 		select {
 		case <-p.ctx.Done():
-			p.logger.Info("Worker %d stopping\n", "id", id)
+			p.logger.Debug("Worker %d stopping\n", "id", id)
 			return
 		default:
 			eventID, queueName, err := p.queue.DequeuePriorityBlocking(5 * time.Second)
 			if err != nil {
-				p.logger.Error("failed to dequeue", "error", err)
+				p.logger.Info("failed to dequeue", "error", err)
 				continue
 			}
 
@@ -232,7 +232,6 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int) {
 
 func (p *WorkerPool) executeTask(ctx context.Context, task handler.TaskRequest) error {
 	// Route to the appropriate job handler based on command
-
 	p.logger.Info("Logging the task type", "task type", task.Type)
 
 	switch task.Type {
