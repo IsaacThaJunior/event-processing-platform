@@ -352,6 +352,7 @@ func (p *WorkerPool) enqueueNextTask(
 		traceID,
 		next.Priority,
 		rootTaskID,
+		nil,
 	)
 	if err != nil {
 		return err

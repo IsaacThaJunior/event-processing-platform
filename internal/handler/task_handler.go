@@ -39,37 +39,6 @@ func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id 
 	}
 }
 
-func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	logCtx := middleware.GetLogContext(ctx)
-
-	id := r.PathValue("id")
-	if id == "" {
-		logCtx.AddEvent(
-			"no_id_in_request",
-			"failed",
-			fmt.Errorf("Id required"),
-		)
-		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
-		return
-	}
-
-	if err := h.eventRepo.CancelTask(ctx, id); err != nil {
-		logCtx.AddEvent(
-			"cancel_task_error",
-			"failed",
-			err,
-		)
-		sender.RespondWithError(ctx, w, http.StatusConflict, err)
-		return
-	}
-
-	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
-		"status":   "cancelled",
-		"event_id": id,
-	})
-}
-
 func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// Create the logContext so we can add to it
 	ctx := r.Context()
@@ -216,7 +185,7 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
-	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(fullPayload), "pending", traceID, req.Priority, "")
+	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(fullPayload), "pending", traceID, req.Priority, "", req.ExecuteAt)
 	if err != nil {
 		logCtx.AddEvent(
 			"failed_db_saving",
@@ -272,9 +241,44 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send Success
-	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":   "accepted",
 		"event_id": eventID,
-	})
+	}
+	if req.ExecuteAt != nil {
+		resp["scheduled_at"] = req.ExecuteAt
+	}
+	sender.RespondWithJSON(w, http.StatusOK, resp)
 
+}
+
+func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	logCtx := middleware.GetLogContext(ctx)
+
+	id := r.PathValue("id")
+	if id == "" {
+		logCtx.AddEvent(
+			"no_id_in_request",
+			"failed",
+			fmt.Errorf("Id required"),
+		)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
+		return
+	}
+
+	if err := h.eventRepo.CancelTask(ctx, id); err != nil {
+		logCtx.AddEvent(
+			"cancel_task_error",
+			"failed",
+			err,
+		)
+		sender.RespondWithError(ctx, w, http.StatusConflict, err)
+		return
+	}
+
+	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+		"status":   "cancelled",
+		"event_id": id,
+	})
 }

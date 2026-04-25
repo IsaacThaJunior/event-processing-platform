@@ -22,6 +22,8 @@ ALTER TABLE events
 ADD COLUMN IF NOT EXISTS priority TEXT;
 ALTER TABLE events
 ADD COLUMN IF NOT EXISTS parentID TEXT;
+ALTER TABLE events
+ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP;
 
 -- +goose Down
 -- Drop indexes

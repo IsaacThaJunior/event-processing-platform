@@ -36,14 +36,14 @@ func NewAdminHandler(
 // --- response types ---
 
 type taskResponse struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Status    string `json:"status"`
-	Priority  string `json:"priority,omitempty"`
-	ParentID  string `json:"parent_id,omitempty"`
-	TraceID   string `json:"trace_id"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Priority    string `json:"priority,omitempty"`
+	ParentID    string `json:"parent_id,omitempty"`
+	TraceID     string `json:"trace_id"`
+	CreatedAt   string `json:"created_at"`
+	ScheduledAt string `json:"scheduled_at"`
 }
 
 type retryLogResponse struct {
@@ -71,8 +71,8 @@ func toTaskResponse(e database.Event) taskResponse {
 	if e.CreatedAt.Valid {
 		r.CreatedAt = e.CreatedAt.Time.Format("2006-01-02T15:04:05Z")
 	}
-	if e.UpdatedAt.Valid {
-		r.UpdatedAt = e.UpdatedAt.Time.Format("2006-01-02T15:04:05Z")
+	if e.ScheduledAt.Valid {
+		r.ScheduledAt = e.ScheduledAt.Time.Format("2006-01-02T15:04:05Z")
 	}
 	return r
 }

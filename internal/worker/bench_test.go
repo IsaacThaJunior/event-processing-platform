@@ -25,7 +25,7 @@ type benchRepo struct {
 func (r *benchRepo) GetEventByID(_ context.Context, id string) (database.Event, error) {
 	return r.events[id], nil
 }
-func (r *benchRepo) SaveProcessedEvent(_ context.Context, id, eventType, payload, status, traceID, priority, parentID string) error {
+func (r *benchRepo) SaveProcessedEvent(_ context.Context, id, eventType, payload, status, traceID, priority, parentID string, scheduledAt *time.Time) error {
 	return nil
 }
 func (r *benchRepo) ListProcessedEvents(_ context.Context) ([]database.Event, error) { return nil, nil }

@@ -13,7 +13,7 @@ import (
 var ErrNotCancellable = errors.New("task cannot be cancelled: not found or not in pending state")
 
 type EventRepository interface {
-	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id string) error
+	SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id string, scheduledAt *time.Time) error
 	GetEventByID(ctx context.Context, id string) (database.Event, error)
 	ListProcessedEvents(ctx context.Context) ([]database.Event, error)
 	LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error
@@ -29,9 +29,8 @@ func NewEventRepository(q *database.Queries) *SQLCEventRepository {
 	return &SQLCEventRepository{q: q}
 }
 
-func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id string) error {
-
-	return r.q.InsertEvent(ctx, database.InsertEventParams{
+func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parent_id string, scheduledAt *time.Time) error {
+	params := database.InsertEventParams{
 		ID:        id,
 		Status:    pgtype.Text{String: "pending", Valid: true},
 		Payload:   payload,
@@ -41,7 +40,11 @@ func (r *SQLCEventRepository) SaveProcessedEvent(ctx context.Context, id, eventT
 		TraceID:   traceID,
 		Priority:  pgtype.Text{String: priority, Valid: priority != ""},
 		Parentid:  pgtype.Text{String: parent_id, Valid: parent_id != ""},
-	})
+	}
+	if scheduledAt != nil {
+		params.ScheduledAt = pgtype.Timestamp{Time: *scheduledAt, Valid: true}
+	}
+	return r.q.InsertEvent(ctx, params)
 }
 
 // GetEventByID fetches a processed event by ID

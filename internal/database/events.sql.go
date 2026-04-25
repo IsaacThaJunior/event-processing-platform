@@ -53,7 +53,7 @@ func (q *Queries) CountEventsFiltered(ctx context.Context, arg CountEventsFilter
 }
 
 const getEventByID = `-- name: GetEventByID :one
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
 FROM events
 WHERE id = $1
 `
@@ -71,6 +71,7 @@ func (q *Queries) GetEventByID(ctx context.Context, id string) (Event, error) {
 		&i.TraceID,
 		&i.Priority,
 		&i.Parentid,
+		&i.ScheduledAt,
 	)
 	return i, err
 }
@@ -131,22 +132,24 @@ INSERT INTO events (
     type,
     trace_id,
     priority,
-    parentID
+    parentID,
+    scheduled_at
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
 `
 
 type InsertEventParams struct {
-	ID        string
-	Payload   string
-	Status    pgtype.Text
-	CreatedAt pgtype.Timestamp
-	UpdatedAt pgtype.Timestamp
-	Type      string
-	TraceID   string
-	Priority  pgtype.Text
-	Parentid  pgtype.Text
+	ID          string
+	Payload     string
+	Status      pgtype.Text
+	CreatedAt   pgtype.Timestamp
+	UpdatedAt   pgtype.Timestamp
+	Type        string
+	TraceID     string
+	Priority    pgtype.Text
+	Parentid    pgtype.Text
+	ScheduledAt pgtype.Timestamp
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error {
@@ -160,12 +163,13 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.TraceID,
 		arg.Priority,
 		arg.Parentid,
+		arg.ScheduledAt,
 	)
 	return err
 }
 
 const listEvents = `-- name: ListEvents :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
 FROM events
 ORDER BY created_at ASC
 `
@@ -189,6 +193,7 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 			&i.TraceID,
 			&i.Priority,
 			&i.Parentid,
+			&i.ScheduledAt,
 		); err != nil {
 			return nil, err
 		}
@@ -201,7 +206,7 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 }
 
 const listEventsFiltered = `-- name: ListEventsFiltered :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
 FROM events
 WHERE ($1::text IS NULL OR status = $1)
   AND ($2::text IS NULL OR type = $2)
@@ -246,6 +251,7 @@ func (q *Queries) ListEventsFiltered(ctx context.Context, arg ListEventsFiltered
 			&i.TraceID,
 			&i.Priority,
 			&i.Parentid,
+			&i.ScheduledAt,
 		); err != nil {
 			return nil, err
 		}

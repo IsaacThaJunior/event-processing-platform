@@ -2,6 +2,7 @@ package mocks
 
 import (
 	"context"
+	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/stretchr/testify/mock"
@@ -11,8 +12,8 @@ type MockEventRepository struct {
 	mock.Mock
 }
 
-func (m *MockEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parentID string) error {
-	args := m.Called(ctx, id, eventType, payload, status, traceID, priority, parentID)
+func (m *MockEventRepository) SaveProcessedEvent(ctx context.Context, id, eventType, payload, status, traceID, priority, parentID string, scheduledAt *time.Time) error {
+	args := m.Called(ctx, id, eventType, payload, status, traceID, priority, parentID, scheduledAt)
 	return args.Error(0)
 }
 

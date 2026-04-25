@@ -8,9 +8,10 @@ INSERT INTO events (
     type,
     trace_id,
     priority,
-    parentID
+    parentID,
+    scheduled_at
   )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;
 -- name: GetEventByID :one
 SELECT *
@@ -32,7 +33,7 @@ SET status = 'cancelled',
 WHERE id = $1
   AND status = 'pending';
 -- name: ListEventsFiltered :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
 FROM events
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status'))
   AND (sqlc.narg('type')::text IS NULL OR type = sqlc.narg('type'))

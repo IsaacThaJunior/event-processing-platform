@@ -9,15 +9,16 @@ import (
 )
 
 type Event struct {
-	ID        string
-	Type      string
-	Payload   string
-	CreatedAt pgtype.Timestamp
-	Status    pgtype.Text
-	UpdatedAt pgtype.Timestamp
-	TraceID   string
-	Priority  pgtype.Text
-	Parentid  pgtype.Text
+	ID          string
+	Type        string
+	Payload     string
+	CreatedAt   pgtype.Timestamp
+	Status      pgtype.Text
+	UpdatedAt   pgtype.Timestamp
+	TraceID     string
+	Priority    pgtype.Text
+	Parentid    pgtype.Text
+	ScheduledAt pgtype.Timestamp
 }
 
 type EventDeliveryLog struct {
