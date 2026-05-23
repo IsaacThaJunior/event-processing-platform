@@ -11,6 +11,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/handler"
@@ -19,6 +24,8 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 )
+
+var workerTracer = otel.Tracer("worker")
 
 type WorkerPool struct {
 	queue     domain.Queue
@@ -130,38 +137,10 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 	defer p.activeWorkers.Add(-1)
 
 	ctx, logCtx := middleware.WithLogContext(context.Background())
-
 	logCtx.EventID = eventID
 	logCtx.WorkerID = &workerID
 
 	start := time.Now()
-	defer func() {
-		attrs := []any{
-			"task_id", logCtx.EventID,
-			"worker_id", workerID,
-			"queue", queueName,
-			slog.Duration("duration", time.Since(start)),
-		}
-		if logCtx.TaskType != "" {
-			attrs = append(attrs, "task_type", logCtx.TaskType)
-		}
-		if logCtx.Priority != "" {
-			attrs = append(attrs, "priority", logCtx.Priority)
-		}
-		if logCtx.Status != "" {
-			attrs = append(attrs, "status", logCtx.Status)
-		}
-		if len(logCtx.Events) > 0 {
-			attrs = append(attrs, "events", logCtx.Events)
-		}
-		if logCtx.Error != nil {
-			attrs = append(attrs, "error", logCtx.Error)
-		}
-		if traceID, ok := ctx.Value(middleware.TraceIDKey).(string); ok {
-			attrs = append(attrs, "trace_id", traceID)
-		}
-		p.logger.Info("task processed successfully", attrs...)
-	}()
 
 	maxRetries := 5
 	baseDelay := time.Second
@@ -171,11 +150,9 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		event, err := p.repo.GetEventByID(ctx, eventID)
-		ctx = context.WithValue(ctx, middleware.TraceIDKey, event.TraceID)
 		if err != nil {
 			logCtx.AddEvent("get_event_from_db", "failed", err)
-			backoff := baseDelay * time.Duration(1<<(attempt-1))
-			time.Sleep(backoff)
+			time.Sleep(baseDelay * time.Duration(1<<(attempt-1)))
 			continue
 		}
 
@@ -189,10 +166,31 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 		logCtx.Priority = task.Priority
 		lastEvent = event
 
+		// Restore trace context from the HTTP handler so this span appears in the same trace.
+		// The handler serialised the W3C traceparent into task.TraceContext before saving to DB.
+		spanCtx := ctx
+		if task.TraceContext != "" {
+			carrier := propagation.MapCarrier{"traceparent": task.TraceContext}
+			spanCtx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+		}
+		spanCtx, span := workerTracer.Start(spanCtx, "worker.process-task")
+		span.SetAttributes(
+			attribute.String("task.id", eventID),
+			attribute.String("task.type", event.Type),
+			attribute.String("task.priority", task.Priority),
+			attribute.String("queue", queueName),
+			attribute.Int("worker.id", workerID),
+			attribute.Int("attempt", attempt),
+		)
+
+		// Keep the string trace_id in context so the logger can emit it
+		ctx = context.WithValue(spanCtx, middleware.TraceIDKey, event.TraceID)
+
 		if event.Status.String == "cancelled" {
 			logCtx.AddEvent("task_cancelled", "skipped", nil)
 			logCtx.Status = "cancelled"
-			return
+			span.End()
+			break
 		}
 
 		execStart := time.Now()
@@ -201,6 +199,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 
 		if err == nil {
 			logCtx.AddEvent("execute_task", "success", nil)
+			span.End()
 
 			if err := p.repo.UpdateEventStatus(ctx, eventID, "processed"); err != nil {
 				logCtx.AddEvent("update_status_processed", "failed", err)
@@ -221,20 +220,24 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 			}
 
 			logCtx.Status = "processed"
+			p.emitLog(ctx, logCtx, workerID, queueName, start)
 			return
 		}
 
 		logCtx.AddEvent(fmt.Sprintf("execute_task_attempt_%d", attempt), "failed", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
+
 		metrics.TasksRetried.WithLabelValues(event.Type).Inc()
 		if err := p.repo.LogDeliveryStatus(ctx, eventID, "retry", attempt, err.Error()); err != nil {
 			logCtx.AddEvent("log_retry_status", "failed", err)
 		}
 
-		backoff := baseDelay * time.Duration(1<<(attempt-1))
-		time.Sleep(backoff)
+		time.Sleep(baseDelay * time.Duration(1<<(attempt-1)))
 	}
 
-	// After max retries → Dead Letter Queue
+	// Max retries exhausted → Dead Letter Queue
 	p.totalFailed.Add(1)
 	metrics.TasksFailed.WithLabelValues(lastEvent.Type).Inc()
 
@@ -251,6 +254,35 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 	}
 
 	logCtx.Status = "failed"
+	p.emitLog(ctx, logCtx, workerID, queueName, start)
+}
+
+func (p *WorkerPool) emitLog(ctx context.Context, logCtx *middleware.LogContext, workerID int, queueName string, start time.Time) {
+	attrs := []any{
+		"task_id", logCtx.EventID,
+		"worker_id", workerID,
+		"queue", queueName,
+		slog.Duration("duration", time.Since(start)),
+	}
+	if logCtx.TaskType != "" {
+		attrs = append(attrs, "task_type", logCtx.TaskType)
+	}
+	if logCtx.Priority != "" {
+		attrs = append(attrs, "priority", logCtx.Priority)
+	}
+	if logCtx.Status != "" {
+		attrs = append(attrs, "status", logCtx.Status)
+	}
+	if len(logCtx.Events) > 0 {
+		attrs = append(attrs, "events", logCtx.Events)
+	}
+	if logCtx.Error != nil {
+		attrs = append(attrs, "error", logCtx.Error)
+	}
+	if traceID, ok := ctx.Value(middleware.TraceIDKey).(string); ok && traceID != "" {
+		attrs = append(attrs, "traceID", traceID)
+	}
+	p.logger.Info("task processed", attrs...)
 }
 
 func (p *WorkerPool) executeTask(ctx context.Context, task handler.TaskRequest) error {

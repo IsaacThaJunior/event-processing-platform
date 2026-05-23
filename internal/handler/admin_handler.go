@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
@@ -165,7 +166,7 @@ func (h *AdminHandler) HandleListTasks(w http.ResponseWriter, r *http.Request) {
 // GET /api/admin/tasks/{id}
 func (h *AdminHandler) HandleGetTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
@@ -183,7 +184,7 @@ func (h *AdminHandler) HandleGetTask(w http.ResponseWriter, r *http.Request) {
 // GET /api/admin/tasks/{id}/retries
 func (h *AdminHandler) HandleGetTaskRetries(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
@@ -219,7 +220,7 @@ func (h *AdminHandler) HandleGetTaskRetries(w http.ResponseWriter, r *http.Reque
 // POST /api/admin/tasks/{id}/retry
 func (h *AdminHandler) HandleRetryTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
@@ -275,7 +276,7 @@ func (h *AdminHandler) HandleListDLQ(w http.ResponseWriter, r *http.Request) {
 // POST /api/admin/dlq/{id}/retry
 func (h *AdminHandler) HandleRetryDLQTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
@@ -311,7 +312,7 @@ func (h *AdminHandler) HandleRetryDLQTask(w http.ResponseWriter, r *http.Request
 // DELETE /api/admin/dlq/{id}
 func (h *AdminHandler) HandleRemoveDLQTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return
@@ -331,7 +332,7 @@ func (h *AdminHandler) HandleRemoveDLQTask(w http.ResponseWriter, r *http.Reques
 // POST /api/admin/tasks/{id}/requeue — re-enqueues a pending task orphaned from Redis
 func (h *AdminHandler) HandleRequeueTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Id required"))
 		return

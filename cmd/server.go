@@ -1,88 +1,64 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/isaacthajunior/mid-prod/internal/handler"
-	"github.com/isaacthajunior/mid-prod/internal/middleware"
+	midware "github.com/isaacthajunior/mid-prod/internal/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type server struct {
-	adminHandler *handler.AdminHandler
-	taskHandler  *handler.TaskHandler
-	cancel       context.CancelFunc
-	logger       *slog.Logger
-	httpServer   *http.Server
-	port         int
-}
+func newServer(adminHandler *handler.AdminHandler, taskHandler *handler.TaskHandler, logger *slog.Logger) http.Handler {
+	r := chi.NewRouter()
 
-func newServer(adminHandler *handler.AdminHandler, taskHandler *handler.TaskHandler, cancel context.CancelFunc, logger *slog.Logger, port int) *server {
-	s := &server{
-		adminHandler: adminHandler,
-		taskHandler:  taskHandler,
-		cancel:       cancel,
-		logger:       logger,
-		httpServer:   nil,
-	}
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:5173"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
 
-	mux := http.NewServeMux()
+	// otelhttp must be first so the OTel span is in context before TraceMiddleware reads it
+	r.Use(otelhttp.NewMiddleware("event-app"))
+	r.Use(midware.TraceMiddleware)
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(midware.RequestLogger(logger))
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(60 * time.Second))
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("OK"))
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("hi there. Everything is a-ok"))
 	})
 
 	// Task API
-	mux.HandleFunc("POST /tasks", s.taskHandler.HandleCreateTask)
-	mux.HandleFunc("DELETE /tasks/{id}", s.taskHandler.HandleCancelTask)
+	r.Post("/tasks", taskHandler.HandleCreateTask)
+	r.Delete("/tasks/{id}", taskHandler.HandleCancelTask)
 
 	// Admin API
-	mux.HandleFunc("GET /api/admin/dashboard/stats", s.adminHandler.HandleDashboardStats)
-	mux.HandleFunc("GET /api/admin/tasks", s.adminHandler.HandleListTasks)
-	mux.HandleFunc("GET /api/admin/tasks/{id}", s.adminHandler.HandleGetTask)
-	mux.HandleFunc("GET /api/admin/tasks/{id}/retries", s.adminHandler.HandleGetTaskRetries)
-	mux.HandleFunc("POST /api/admin/tasks/{id}/retry", s.adminHandler.HandleRetryTask)
-	mux.HandleFunc("POST /api/admin/tasks/{id}/requeue", s.adminHandler.HandleRequeueTask)
-	mux.HandleFunc("GET /api/admin/dlq", s.adminHandler.HandleListDLQ)
-	mux.HandleFunc("POST /api/admin/dlq/{id}/retry", s.adminHandler.HandleRetryDLQTask)
-	mux.HandleFunc("DELETE /api/admin/dlq/{id}", s.adminHandler.HandleRemoveDLQTask)
-	mux.HandleFunc("GET /api/admin/queue/depth", s.adminHandler.HandleQueueDepth)
-	mux.HandleFunc("GET /api/admin/workers/health", s.adminHandler.HandleWorkerHealth)
+	r.Route("/api/admin", func(r chi.Router) {
+		r.Get("/dashboard/stats", adminHandler.HandleDashboardStats)
+		r.Get("/tasks", adminHandler.HandleListTasks)
+		r.Get("/tasks/{id}", adminHandler.HandleGetTask)
+		r.Get("/tasks/{id}/retries", adminHandler.HandleGetTaskRetries)
+		r.Post("/tasks/{id}/retry", adminHandler.HandleRetryTask)
+		r.Post("/tasks/{id}/requeue", adminHandler.HandleRequeueTask)
+		r.Get("/dlq", adminHandler.HandleListDLQ)
+		r.Post("/dlq/{id}/retry", adminHandler.HandleRetryDLQTask)
+		r.Delete("/dlq/{id}", adminHandler.HandleRemoveDLQTask)
+		r.Get("/queue/depth", adminHandler.HandleQueueDepth)
+		r.Get("/workers/health", adminHandler.HandleWorkerHealth)
+	})
 
-	mux.Handle("/metrics", promhttp.Handler())
-	handler := middleware.EnableCORS(middleware.TraceMiddleware(middleware.RequestLogger(logger)(mux)))
+	r.Handle("/metrics", promhttp.Handler())
 
-	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: handler,
-	}
-
-	return s
-}
-
-func (s *server) start() error {
-	ln, err := net.Listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		return err
-	}
-
-	addr := ln.Addr()
-	tcpAddr := addr.(*net.TCPAddr)
-
-	s.logger.Debug("Debugging", "message", "Event App is running on http://localhost", "port", tcpAddr.Port)
-
-	if err := s.httpServer.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
-}
-
-func (s *server) shutdown(ctx context.Context) error {
-	s.logger.Debug("Event app is shutting down")
-	return s.httpServer.Shutdown(ctx)
+	return r
 }

@@ -149,7 +149,7 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 
 			if traceID, ok := r.Context().Value(TraceIDKey).(string); ok && traceID != "" {
-				attrs = append(attrs, "trace_id", traceID)
+				attrs = append(attrs, "traceID", traceID)
 			}
 
 			if logCtx.Priority != "" {

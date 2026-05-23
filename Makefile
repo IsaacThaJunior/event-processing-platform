@@ -4,6 +4,9 @@ export
 # This swaps 'postgres' with 'localhost' only for the Makefile commands
 LOCAL_DB_URL=$(subst @postgres:,@localhost:,$(DB_URL))
 
+up:
+	docker-compose up
+
 # Run migrations
 migrate-up:
 	goose -dir sql/schema postgres "$(LOCAL_DB_URL)" up

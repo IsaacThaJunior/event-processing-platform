@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/database"
@@ -17,6 +16,7 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 	"github.com/isaacthajunior/mid-prod/internal/taskerr"
+	"github.com/isaacthajunior/mid-prod/internal/telemetry"
 	"github.com/isaacthajunior/mid-prod/internal/worker"
 
 	"github.com/lmittmann/tint"
@@ -26,18 +26,27 @@ import (
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	httpPort := 8080
-	status := run(ctx, cancel, httpPort)
-	cancel()
+	status := run(httpPort)
 	os.Exit(status)
 }
 
-func run(ctx context.Context, cancel context.CancelFunc, port int) int {
+func run(port int) int {
 	logger, closeFunc, err := initializeLogger()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		return 1
+	}
+
+	otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if otelEndpoint == "" {
+		otelEndpoint = "otel-collector:4318"
+	}
+	tp, err := telemetry.NewTracerProvider(context.Background(), otelEndpoint)
+	if err != nil {
+		logger.Warn("traces disabled — could not reach OTel Collector", "error", err)
+	} else {
+		defer tp.Shutdown(context.Background()) //nolint:errcheck
 	}
 
 	pool, err := database.NewPool()
@@ -79,22 +88,16 @@ func run(ctx context.Context, cancel context.CancelFunc, port int) int {
 	adminRepo := repository.NewAdminRepository(queries)
 	adminHandler := handler.NewAdminHandler(adminRepo, queue, workerPool)
 
-	s := newServer(adminHandler, taskHandler, cancel, logger, port)
-	var serverErr error
-	go func() {
-		serverErr = s.start()
-	}()
-
-	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := s.shutdown(shutdownCtx); err != nil {
-		logger.Error("An error occured", "message", "failed to shutdown server", "err", err)
-		return 1
+	srv := &http.Server{
+		Addr:         fmt.Sprintf(":%d", port),
+		Handler:      newServer(adminHandler, taskHandler, logger),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  time.Minute,
 	}
-	if serverErr != nil {
-		logger.Error("An error occured", "message", "server error", "err", serverErr)
+
+	logger.Debug("server started", "port", port)
+	if err = srv.ListenAndServe(); err != nil {
 		return 1
 	}
 
@@ -119,7 +122,7 @@ func (h maxLevelHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func initializeLogger() (*slog.Logger, closeFunc, error) {
 	isTTY := isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd())
-	logFile := "logs/tasks.json"
+	logFile := "logs/tasks.log"
 
 	// Create the stderr (debug) handler with tint for colorized output
 	debugHandler := tint.NewHandler(os.Stderr, &tint.Options{

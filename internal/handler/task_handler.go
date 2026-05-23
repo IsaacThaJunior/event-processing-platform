@@ -6,13 +6,21 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/middleware"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/sender"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 )
+
+var taskTracer = otel.Tracer("handler.task")
 
 type TaskHandler struct {
 	queue       domain.Queue
@@ -26,8 +34,9 @@ type TaskRequest struct {
 	Payload   json.RawMessage `json:"payload"`
 	Priority  string          `json:"priority"`
 	ExecuteAt *time.Time      `json:"execute_at,omitempty"`
-
-	Next *TaskRequest `json:"next,omitempty"`
+	Next      *TaskRequest    `json:"next,omitempty"`
+	// TraceContext carries the W3C traceparent so workers continue this trace.
+	TraceContext string `json:"trace_context,omitempty"`
 }
 
 func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, validator *service.TaskValidator) *TaskHandler {
@@ -40,130 +49,83 @@ func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id 
 }
 
 func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
-	// Create the logContext so we can add to it
-	ctx := r.Context()
+	ctx, span := taskTracer.Start(r.Context(), "HandleCreateTask")
+	defer span.End()
+
 	logCtx := middleware.GetLogContext(ctx)
-	traceID := r.Context().Value(middleware.TraceIDKey).(string)
-	if traceID == "" {
-		traceID = "no-trace-id"
-	}
+	traceID, _ := ctx.Value(middleware.TraceIDKey).(string)
 
 	var req TaskRequest
-
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logCtx.AddEvent(
-			"decode_request_body",
-			"failed",
-			err,
-		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "decode request body")
+		logCtx.AddEvent("decode_request_body", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
 	}
 
-	// -----------------------------
-	// Basic validation
-	// -----------------------------
+	// --- validation ---
 	if req.Type == "" {
-		logCtx.AddEvent(
-			"request_type_empty",
-			"failed",
-			fmt.Errorf("missing type"),
-		)
+		logCtx.AddEvent("request_type_empty", "failed", fmt.Errorf("missing type"))
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("missing type"))
 		return
 	}
-
 	if len(req.Payload) == 0 {
-		logCtx.AddEvent(
-			"request_payload_empty",
-			"failed",
-			fmt.Errorf("missing payload"),
-		)
+		logCtx.AddEvent("request_payload_empty", "failed", fmt.Errorf("missing payload"))
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("missing payload"))
 		return
 	}
-
 	if req.ExecuteAt != nil && req.ExecuteAt.Before(time.Now()) {
-		logCtx.AddEvent(
-			"past_executes_at_time",
-			"failed",
-			fmt.Errorf("Executes at must be in the future"),
-		)
-		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Executes at must be in the future"))
+		logCtx.AddEvent("past_executes_at_time", "failed", fmt.Errorf("execute_at must be in the future"))
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("execute_at must be in the future"))
 		return
 	}
-
 	if req.Priority == "" {
 		req.Priority = "medium"
 	}
-
-	// -----------------------------
-	// Validate main task
-	// -----------------------------
 	if err := h.validator.Validate(req.Type, req.Payload); err != nil {
-		logCtx.AddEvent(
-			"type_and_payload_validator",
-			"failed",
-			err,
-		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "validation failed")
+		logCtx.AddEvent("type_and_payload_validator", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
 	}
-
-	// -----------------------------
-	// Validate next ONLY if exists
-	// -----------------------------
 	if req.Next != nil {
 		if req.Next.Type == "" {
-			logCtx.AddEvent(
-				"next_type_empty",
-				"failed",
-				fmt.Errorf("Next type is empty"),
-			)
+			logCtx.AddEvent("next_type_empty", "failed", fmt.Errorf("Next type is empty"))
 			sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Next type is empty"))
 			return
 		}
-
 		if len(req.Next.Payload) > 0 {
 			if err := h.validator.Validate(req.Next.Type, req.Next.Payload); err != nil {
-				logCtx.AddEvent(
-					"next_payload_empty",
-					"failed",
-					err,
-				)
+				logCtx.AddEvent("next_payload_empty", "failed", err)
 				sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 				return
 			}
 		}
 	}
 
-	logCtx.AddEvent(
-		"passed_all_validation_checks",
-		"success",
-		nil,
-	)
+	logCtx.AddEvent("passed_all_validation_checks", "success", nil)
 	logCtx.TaskType = req.Type
 	logCtx.Priority = req.Priority
+	span.SetAttributes(
+		attribute.String("task.type", req.Type),
+		attribute.String("task.priority", req.Priority),
+	)
 
+	// --- idempotency check ---
+	idemCtx, idemSpan := taskTracer.Start(ctx, "check-idempotency")
 	key := h.idempotency.GenerateIdempotencyKey(req.Type, string(req.Payload), req.Priority)
-
-	processed, existingEventID, err := h.idempotency.Isprocessed(ctx, key)
+	processed, existingEventID, err := h.idempotency.Isprocessed(idemCtx, key)
+	idemSpan.End()
 	if err != nil {
-		logCtx.AddEvent(
-			"failed_idempotency_check",
-			"failed",
-			err,
-		)
+		span.RecordError(err)
+		logCtx.AddEvent("failed_idempotency_check", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
-
 	if processed {
-		logCtx.AddEvent(
-			"duplicate_event",
-			"success",
-			nil,
-		)
+		logCtx.AddEvent("duplicate_event", "success", nil)
 		sender.RespondWithJSON(w, http.StatusConflict, map[string]any{
 			"status":   "duplicate",
 			"event_id": existingEventID,
@@ -173,90 +135,70 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	eventID := uuid.New().String()
 	logCtx.EventID = eventID
+	span.SetAttributes(attribute.String("task.id", eventID))
 
-	// Save event — marshal the full request so the worker can read Next
+	// Inject W3C traceparent so the worker continues this trace
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	req.TraceContext = carrier["traceparent"]
+
+	// --- persist ---
+	_, dbSpan := taskTracer.Start(ctx, "save-task-to-db")
 	fullPayload, err := json.Marshal(req)
 	if err != nil {
-		logCtx.AddEvent(
-			"failed_marshalling",
-			"failed",
-			err,
-		)
+		dbSpan.RecordError(err)
+		dbSpan.End()
+		logCtx.AddEvent("failed_marshalling", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 	err = h.eventRepo.SaveProcessedEvent(ctx, eventID, req.Type, string(fullPayload), "pending", traceID, req.Priority, "", req.ExecuteAt)
+	dbSpan.End()
 	if err != nil {
-		logCtx.AddEvent(
-			"failed_db_saving",
-			"failed",
-			err,
-		)
+		span.RecordError(err)
+		logCtx.AddEvent("failed_db_saving", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
-	// Record idempotency
-	meta := &service.IdempotencyMetadata{
-		Command: req.Type,
-		Source:  "api",
-	}
+	meta := &service.IdempotencyMetadata{Command: req.Type, Source: "api"}
 	_, err = h.idempotency.CheckAndRecordToDB(ctx, key, eventID, meta)
 	if err != nil {
-		logCtx.AddEvent(
-			"failed_db_inserting",
-			"failed",
-			err,
-		)
+		span.RecordError(err)
+		logCtx.AddEvent("failed_db_inserting", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
 		return
 	}
 
-	// Enqueue
+	// --- enqueue ---
+	_, enqSpan := taskTracer.Start(ctx, "enqueue-task")
 	if req.ExecuteAt != nil {
-		if err := h.queue.Schedule(eventID, req.Priority, *req.ExecuteAt); err != nil {
-			logCtx.AddEvent(
-				"failed_db_inserting",
-				"failed",
-				err,
-			)
-			logCtx.Status = "failed"
-			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
-			sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
-			return
-		}
-
+		err = h.queue.Schedule(eventID, req.Priority, *req.ExecuteAt)
 	} else {
-		if err := h.queue.EnqueueWithPriority(eventID, req.Priority); err != nil {
-			logCtx.AddEvent(
-				"failed_enqueing_for_scheduled",
-				"failed",
-				err,
-			)
-			logCtx.Status = "failed"
-			h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
-			sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
-			return
-		}
+		err = h.queue.EnqueueWithPriority(eventID, req.Priority)
+	}
+	enqSpan.End()
+	if err != nil {
+		span.RecordError(err)
+		logCtx.AddEvent("failed_enqueue", "failed", err)
+		logCtx.Status = "failed"
+		h.eventRepo.UpdateEventStatus(ctx, eventID, "failed")
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
+		return
 	}
 
-	// Send Success
-	resp := map[string]any{
-		"status":   "accepted",
-		"event_id": eventID,
-	}
+	resp := map[string]any{"status": "accepted", "event_id": eventID}
 	if req.ExecuteAt != nil {
 		resp["scheduled_at"] = req.ExecuteAt
 	}
 	sender.RespondWithJSON(w, http.StatusOK, resp)
-
 }
 
 func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	logCtx := middleware.GetLogContext(ctx)
 
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		logCtx.AddEvent(
 			"no_id_in_request",
