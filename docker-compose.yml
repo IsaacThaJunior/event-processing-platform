@@ -97,21 +97,11 @@ services:
     container_name: event-tempo
     user: root
     command: ["-config.file=/etc/tempo.yaml", "-target=all"]
-    volumes:
-      - ./tempo.yaml:/etc/tempo.yaml
-      - tempo_data:/tmp/tempo
-    networks:
-      - observability
-
-  tempo-proxy:
-    image: nginx:alpine
-    container_name: event-tempo-proxy
     ports:
       - "3200:3200"
     volumes:
-      - ./nginx-tempo.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - tempo
+      - ./tempo.yaml:/etc/tempo.yaml
+      - tempo_data:/tmp/tempo
     networks:
       - observability
 
