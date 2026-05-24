@@ -18,6 +18,7 @@ type EventRepository interface {
 	ListProcessedEvents(ctx context.Context) ([]database.Event, error)
 	LogDeliveryStatus(ctx context.Context, id, status string, attempt int, errMsg string) error
 	UpdateEventStatus(ctx context.Context, id, status string) error
+	UpdateEventResult(ctx context.Context, id, result string) error
 	CancelTask(ctx context.Context, id string) error
 }
 
@@ -70,6 +71,13 @@ func (r *SQLCEventRepository) UpdateEventStatus(ctx context.Context, id, status 
 	return r.q.UpdateEventStatus(ctx, database.UpdateEventStatusParams{
 		ID:     id,
 		Status: pgtype.Text{String: status, Valid: true},
+	})
+}
+
+func (r *SQLCEventRepository) UpdateEventResult(ctx context.Context, id, result string) error {
+	return r.q.UpdateEventResult(ctx, database.UpdateEventResultParams{
+		ID:     id,
+		Result: pgtype.Text{String: result, Valid: true},
 	})
 }
 

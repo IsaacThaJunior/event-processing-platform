@@ -3,12 +3,19 @@ package worker
 
 import (
 	"context"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"io"
 	"log/slog"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/disintegration/imaging"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -23,6 +30,7 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/middleware"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/service"
+	"github.com/isaacthajunior/mid-prod/internal/storage"
 )
 
 var workerTracer = otel.Tracer("worker")
@@ -36,6 +44,7 @@ type WorkerPool struct {
 	wg        sync.WaitGroup
 	logger    *slog.Logger
 	validator *service.TaskValidator
+	storage   *storage.Client
 
 	activeWorkers  atomic.Int32
 	totalProcessed atomic.Int64
@@ -49,6 +58,7 @@ func NewWorkerPool(
 	workerCount int,
 	logger *slog.Logger,
 	validator *service.TaskValidator,
+	storageClient *storage.Client,
 ) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerPool{
@@ -59,6 +69,7 @@ func NewWorkerPool(
 		cancel:    cancel,
 		logger:    logger,
 		validator: validator,
+		storage:   storageClient,
 		startTime: time.Now(),
 	}
 }
@@ -147,6 +158,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 
 	var lastEvent database.Event
 	var task handler.TaskRequest
+	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		event, err := p.repo.GetEventByID(ctx, eventID)
@@ -194,7 +206,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 		}
 
 		execStart := time.Now()
-		err = p.executeTask(ctx, task)
+		err = p.executeTask(ctx, eventID, task, logCtx)
 		metrics.TaskDuration.Observe(time.Since(execStart).Seconds())
 
 		if err == nil {
@@ -224,6 +236,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 			return
 		}
 
+		lastErr = err
 		logCtx.AddEvent(fmt.Sprintf("execute_task_attempt_%d", attempt), "failed", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -254,6 +267,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 	}
 
 	logCtx.Status = "failed"
+	logCtx.Error = lastErr
 	p.emitLog(ctx, logCtx, workerID, queueName, start)
 }
 
@@ -285,10 +299,14 @@ func (p *WorkerPool) emitLog(ctx context.Context, logCtx *middleware.LogContext,
 	p.logger.Info("task processed", attrs...)
 }
 
-func (p *WorkerPool) executeTask(ctx context.Context, task handler.TaskRequest) error {
+func (p *WorkerPool) executeTask(ctx context.Context, eventID string, task handler.TaskRequest, logCtx *middleware.LogContext) error {
 	switch task.Type {
 	case "resize_image":
-		return p.handleResizeImage(ctx, task.Payload)
+		payload, err := injectTaskID(task.Payload, eventID)
+		if err != nil {
+			return err
+		}
+		return p.handleResizeImage(ctx, payload, logCtx)
 	case "scrape_url":
 		return p.handleScrapeURL(ctx, task.Payload)
 	case "generate_report":
@@ -298,27 +316,127 @@ func (p *WorkerPool) executeTask(ctx context.Context, task handler.TaskRequest) 
 	}
 }
 
-func (p *WorkerPool) handleResizeImage(ctx context.Context, payload []byte) error {
-	// Parse payload
+func injectTaskID(payload json.RawMessage, taskID string) (json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return nil, fmt.Errorf("injectTaskID: %w", err)
+	}
+	idBytes, _ := json.Marshal(taskID)
+	m["task_id"] = idBytes
+	return json.Marshal(m)
+}
+
+const maxImageBytes = 10 << 20 // 10 MB
+
+func (p *WorkerPool) handleResizeImage(ctx context.Context, payload []byte, logCtx *middleware.LogContext) error {
 	var params struct {
-		ImageURL string `json:"image_url"`
-		Width    int    `json:"width"`
-		Height   int    `json:"height"`
+		ImageURL     string `json:"image_url"`
+		Width        int    `json:"width"`
+		Height       int    `json:"height"`
+		Mode         string `json:"mode"`
+		OutputFormat string `json:"output_format"`
+		Quality      int    `json:"quality"`
+		TaskID       string `json:"task_id"`
 	}
-	if err := json.Unmarshal([]byte(payload), &params); err != nil {
-		return fmt.Errorf("failed to parse resize params: %w", err)
+	if err := json.Unmarshal(payload, &params); err != nil {
+		return fmt.Errorf("resize: parse payload: %w", err)
 	}
 
-	// Validate parameters
-	if params.ImageURL == "" {
-		return fmt.Errorf("image_url is required")
+	// Defaults
+	if params.Mode == "" {
+		params.Mode = "fit"
+	}
+	if params.OutputFormat == "" {
+		params.OutputFormat = "jpeg"
+	}
+	if params.Quality == 0 {
+		params.Quality = 85
 	}
 
-	fmt.Printf("📷 [Job] Resizing image %s to %dx%d \n",
-		params.ImageURL, params.Width, params.Height)
+	// Download with SSRF guard and size limit
+	client := safeHTTPClient(30)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, params.ImageURL, nil)
+	if err != nil {
+		return fmt.Errorf("resize: build request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		logCtx.AddEvent("resize_download", "failed", err)
+		return fmt.Errorf("resize: download: %w", err)
+	}
+	defer resp.Body.Close()
 
-	// TODO: Implement actual image resizing logic here
-	time.Sleep(1 * time.Second)
+	if resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("resize: download status %d", resp.StatusCode)
+		logCtx.AddEvent("resize_download", "failed", err)
+		return err
+	}
+	logCtx.AddEvent("resize_download", "success", nil)
+
+	limited := io.LimitReader(resp.Body, maxImageBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return fmt.Errorf("resize: read body: %w", err)
+	}
+	if int64(len(raw)) > maxImageBytes {
+		return fmt.Errorf("resize: image exceeds %d MB limit", maxImageBytes>>20)
+	}
+
+	// Decode
+	src, err := imaging.Decode(bytes.NewReader(raw))
+	if err != nil {
+		logCtx.AddEvent("resize_decode", "failed", err)
+		return fmt.Errorf("resize: decode: %w", err)
+	}
+	logCtx.AddEvent("resize_decode", "success", nil)
+
+	// Resize
+	var dst image.Image
+	switch params.Mode {
+	case "fill":
+		dst = imaging.Fill(src, params.Width, params.Height, imaging.Center, imaging.Lanczos)
+	case "stretch":
+		dst = imaging.Resize(src, params.Width, params.Height, imaging.Lanczos)
+	default: // fit
+		dst = imaging.Fit(src, params.Width, params.Height, imaging.Lanczos)
+	}
+	logCtx.AddEvent("resize_transform", "success", nil)
+
+	// Encode into a buffer
+	var buf bytes.Buffer
+	var contentType string
+	switch strings.ToLower(params.OutputFormat) {
+	case "png":
+		contentType = "image/png"
+		err = imaging.Encode(&buf, dst, imaging.PNG)
+	default: // jpeg
+		contentType = "image/jpeg"
+		err = imaging.Encode(&buf, dst, imaging.JPEG, imaging.JPEGQuality(params.Quality))
+	}
+	if err != nil {
+		logCtx.AddEvent("resize_encode", "failed", err)
+		return fmt.Errorf("resize: encode: %w", err)
+	}
+	logCtx.AddEvent("resize_encode", "success", nil)
+
+	// Upload to MinIO
+	if p.storage == nil {
+		return fmt.Errorf("resize: storage client not configured")
+	}
+	key := fmt.Sprintf("resized/%s.%s", params.TaskID, params.OutputFormat)
+	if _, err := p.storage.Upload(ctx, key, contentType, &buf, int64(buf.Len())); err != nil {
+		logCtx.AddEvent("resize_upload", "failed", err)
+		return fmt.Errorf("resize: upload: %w", err)
+	}
+	logCtx.AddEvent("resize_upload", "success", nil)
+
+	// Persist a typed result so the result endpoint knows how to serve it.
+	resultJSON, _ := json.Marshal(map[string]string{"kind": "file", "key": key})
+	if err := p.repo.UpdateEventResult(ctx, params.TaskID, string(resultJSON)); err != nil {
+		logCtx.AddEvent("resize_save_result", "failed", err)
+		return fmt.Errorf("resize: save result: %w", err)
+	}
+	logCtx.AddEvent("resize_save_result", "success", nil)
 
 	return nil
 }

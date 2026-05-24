@@ -17,6 +17,22 @@ services:
       - otel-collector
       - redis
       - postgres
+      - minio
+    networks:
+      - observability
+
+  minio:
+    image: minio/minio:latest
+    container_name: event-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
     networks:
       - observability
 
@@ -125,6 +141,7 @@ volumes:
   grafana_data:
   loki_data:
   tempo_data:
+  minio_data:
 
 networks:
   observability:

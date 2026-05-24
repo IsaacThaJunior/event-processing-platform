@@ -122,6 +122,11 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				ResponseWriter: w,
 			}
 
+			if r.URL.Path == "/metrics" || r.URL.Path == "/health" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			start := time.Now()
 
 			// Execute request

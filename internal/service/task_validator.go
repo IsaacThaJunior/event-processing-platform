@@ -16,9 +16,12 @@ func (v *TaskValidator) Validate(taskType string, payload json.RawMessage) error
 
 	case "resize_image":
 		var p struct {
-			ImageURL string `json:"image_url"`
-			Width    int    `json:"width"`
-			Height   int    `json:"height"`
+			ImageURL     string `json:"image_url"`
+			Width        int    `json:"width"`
+			Height       int    `json:"height"`
+			Mode         string `json:"mode"`
+			OutputFormat string `json:"output_format"`
+			Quality      int    `json:"quality"`
 		}
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return errors.New("invalid payload format for resize_image")
@@ -28,6 +31,15 @@ func (v *TaskValidator) Validate(taskType string, payload json.RawMessage) error
 		}
 		if p.Width <= 0 || p.Height <= 0 {
 			return errors.New("width and height must be > 0")
+		}
+		if p.Mode != "" && p.Mode != "fit" && p.Mode != "fill" && p.Mode != "stretch" {
+			return errors.New("mode must be fit, fill, or stretch")
+		}
+		if p.OutputFormat != "" && p.OutputFormat != "jpeg" && p.OutputFormat != "png" {
+			return errors.New("output_format must be jpeg or png")
+		}
+		if p.Quality < 0 || p.Quality > 100 {
+			return errors.New("quality must be between 0 and 100")
 		}
 		return nil
 

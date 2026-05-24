@@ -33,7 +33,7 @@ SET status = 'cancelled',
 WHERE id = $1
   AND status = 'pending';
 -- name: ListEventsFiltered :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
+SELECT *
 FROM events
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status'))
   AND (sqlc.narg('type')::text IS NULL OR type = sqlc.narg('type'))
@@ -58,6 +58,12 @@ SELECT COUNT(*)
 FROM events
 WHERE status = 'processed'
   AND updated_at >= NOW() - INTERVAL '24 hours';
+-- name: UpdateEventResult :exec
+UPDATE events
+SET result = $2,
+  updated_at = NOW()
+WHERE id = $1;
+
 -- name: ResetTaskForRetry :one
 UPDATE events
 SET status = 'pending',

@@ -19,7 +19,7 @@ func newServer(adminHandler *handler.AdminHandler, taskHandler *handler.TaskHand
 	r := chi.NewRouter()
 
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:5173"},
+		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:5173", "http://localhost:3001"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
@@ -42,6 +42,7 @@ func newServer(adminHandler *handler.AdminHandler, taskHandler *handler.TaskHand
 	// Task API
 	r.Post("/tasks", taskHandler.HandleCreateTask)
 	r.Delete("/tasks/{id}", taskHandler.HandleCancelTask)
+	r.Get("/tasks/{id}/result", taskHandler.HandleGetTaskResult)
 
 	// Admin API
 	r.Route("/api/admin", func(r chi.Router) {

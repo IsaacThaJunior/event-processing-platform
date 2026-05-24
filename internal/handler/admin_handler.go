@@ -44,7 +44,8 @@ type taskResponse struct {
 	ParentID    string `json:"parent_id,omitempty"`
 	TraceID     string `json:"trace_id"`
 	CreatedAt   string `json:"created_at"`
-	ScheduledAt string `json:"scheduled_at"`
+	ScheduledAt string `json:"scheduled_at,omitempty"`
+	ResultURL   string `json:"result_url,omitempty"`
 }
 
 type retryLogResponse struct {

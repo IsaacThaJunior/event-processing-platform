@@ -19,6 +19,7 @@ type Event struct {
 	Priority    pgtype.Text
 	Parentid    pgtype.Text
 	ScheduledAt pgtype.Timestamp
+	Result      pgtype.Text
 }
 
 type EventDeliveryLog struct {

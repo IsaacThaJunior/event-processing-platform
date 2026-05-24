@@ -18,6 +18,7 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/sender"
 	"github.com/isaacthajunior/mid-prod/internal/service"
+	"github.com/isaacthajunior/mid-prod/internal/storage"
 )
 
 var taskTracer = otel.Tracer("handler.task")
@@ -27,6 +28,7 @@ type TaskHandler struct {
 	eventRepo   repository.EventRepository
 	idempotency *service.IdempotencyRepo
 	validator   *service.TaskValidator
+	storage     *storage.Client
 }
 
 type TaskRequest struct {
@@ -39,12 +41,13 @@ type TaskRequest struct {
 	TraceContext string `json:"trace_context,omitempty"`
 }
 
-func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, validator *service.TaskValidator) *TaskHandler {
+func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, validator *service.TaskValidator, storageClient *storage.Client) *TaskHandler {
 	return &TaskHandler{
 		queue:       queue,
 		eventRepo:   eventRepo,
 		idempotency: id,
 		validator:   validator,
+		storage:     storageClient,
 	}
 }
 
@@ -223,4 +226,64 @@ func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
 		"status":   "cancelled",
 		"event_id": id,
 	})
+}
+
+// GET /tasks/{id}/result — returns the output of a completed task.
+// File-producing tasks (resize_image, generate_report) return a presigned download URL.
+// Non-file tasks (send_email) return their delivery data directly.
+func (h *TaskHandler) HandleGetTaskResult(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := chi.URLParam(r, "id")
+
+	event, err := h.eventRepo.GetEventByID(ctx, id)
+	if err != nil {
+		sender.RespondWithError(ctx, w, http.StatusNotFound, fmt.Errorf("task not found"))
+		return
+	}
+
+	if !event.Status.Valid || event.Status.String != "processed" {
+		sender.RespondWithJSON(w, http.StatusAccepted, map[string]any{
+			"event_id": id,
+			"status":   event.Status.String,
+			"message":  "task not yet processed",
+		})
+		return
+	}
+
+	if !event.Result.Valid || event.Result.String == "" {
+		sender.RespondWithError(ctx, w, http.StatusNotFound, fmt.Errorf("no result for this task"))
+		return
+	}
+
+	// All results are stored as {"kind": "...", ...} so handlers can evolve independently.
+	var result map[string]any
+	if err := json.Unmarshal([]byte(event.Result.String), &result); err != nil {
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, fmt.Errorf("malformed result"))
+		return
+	}
+
+	switch result["kind"] {
+	case "file":
+		key, _ := result["key"].(string)
+		if h.storage == nil {
+			sender.RespondWithError(ctx, w, http.StatusServiceUnavailable, fmt.Errorf("storage not configured"))
+			return
+		}
+		url, err := h.storage.PresignedURL(ctx, key)
+		if err != nil {
+			sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
+			return
+		}
+		sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+			"event_id":   id,
+			"kind":       "file",
+			"result_url": url,
+			"expires_in": "24h",
+		})
+
+	default:
+		// Non-file results (e.g. email delivery) — return the data as-is.
+		result["event_id"] = id
+		sender.RespondWithJSON(w, http.StatusOK, result)
+	}
 }

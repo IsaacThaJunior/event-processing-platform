@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/handler"
+	"github.com/isaacthajunior/mid-prod/internal/middleware"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -32,8 +33,9 @@ func (r *benchRepo) ListProcessedEvents(_ context.Context) ([]database.Event, er
 func (r *benchRepo) LogDeliveryStatus(_ context.Context, id, status string, attempt int, errMsg string) error {
 	return nil
 }
-func (r *benchRepo) UpdateEventStatus(_ context.Context, id, status string) error { return nil }
-func (r *benchRepo) CancelTask(_ context.Context, id string) error                { return nil }
+func (r *benchRepo) UpdateEventStatus(_ context.Context, id, status string) error  { return nil }
+func (r *benchRepo) UpdateEventResult(_ context.Context, id, result string) error  { return nil }
+func (r *benchRepo) CancelTask(_ context.Context, id string) error                 { return nil }
 
 type benchQueue struct{}
 
@@ -61,6 +63,7 @@ func newBenchPool(repo repository.EventRepository) *WorkerPool {
 		cancel:    cancel,
 		logger:    slog.Default(),
 		validator: service.NewTaskValidator(),
+		storage:   nil,
 	}
 }
 
@@ -120,7 +123,7 @@ func BenchmarkExecuteTask(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				pool.executeTask(ctx, tc.task)
+				pool.executeTask(ctx, "bench-id", tc.task, &middleware.LogContext{})
 			}
 		})
 	}

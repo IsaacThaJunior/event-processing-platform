@@ -15,6 +15,7 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/metrics"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/service"
+	"github.com/isaacthajunior/mid-prod/internal/storage"
 	"github.com/isaacthajunior/mid-prod/internal/taskerr"
 	"github.com/isaacthajunior/mid-prod/internal/telemetry"
 	"github.com/isaacthajunior/mid-prod/internal/worker"
@@ -74,15 +75,24 @@ func run(port int) int {
 	queue := repository.NewRedisQueue(redisClient, "events_queue")
 	validator := service.NewTaskValidator()
 
+	storageClient, err := storage.NewMinioClient()
+	if err != nil {
+		logger.Warn("storage unavailable — image tasks will fail", "error", err)
+	} else {
+		if err := storageClient.EnsureBucket(context.Background()); err != nil {
+			logger.Warn("could not ensure minio bucket", "error", err)
+		}
+	}
+
 	// --- Worker pool ---
-	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger, validator)
+	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger, validator, storageClient)
 	workerPool.Start()
 	defer workerPool.Stop()
 
 	metrics.Init()
 
 	// Task handler
-	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, validator)
+	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, validator, storageClient)
 
 	// Admin handler
 	adminRepo := repository.NewAdminRepository(queries)

@@ -53,7 +53,7 @@ func (q *Queries) CountEventsFiltered(ctx context.Context, arg CountEventsFilter
 }
 
 const getEventByID = `-- name: GetEventByID :one
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at, result
 FROM events
 WHERE id = $1
 `
@@ -72,6 +72,7 @@ func (q *Queries) GetEventByID(ctx context.Context, id string) (Event, error) {
 		&i.Priority,
 		&i.Parentid,
 		&i.ScheduledAt,
+		&i.Result,
 	)
 	return i, err
 }
@@ -136,7 +137,7 @@ INSERT INTO events (
     scheduled_at
   )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
+RETURNING id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at, result
 `
 
 type InsertEventParams struct {
@@ -169,7 +170,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 }
 
 const listEvents = `-- name: ListEvents :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at, result
 FROM events
 ORDER BY created_at ASC
 `
@@ -194,6 +195,7 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 			&i.Priority,
 			&i.Parentid,
 			&i.ScheduledAt,
+			&i.Result,
 		); err != nil {
 			return nil, err
 		}
@@ -206,7 +208,7 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 }
 
 const listEventsFiltered = `-- name: ListEventsFiltered :many
-SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at, result
 FROM events
 WHERE ($1::text IS NULL OR status = $1)
   AND ($2::text IS NULL OR type = $2)
@@ -252,6 +254,7 @@ func (q *Queries) ListEventsFiltered(ctx context.Context, arg ListEventsFiltered
 			&i.Priority,
 			&i.Parentid,
 			&i.ScheduledAt,
+			&i.Result,
 		); err != nil {
 			return nil, err
 		}
@@ -277,6 +280,23 @@ func (q *Queries) ResetTaskForRetry(ctx context.Context, id string) (pgtype.Text
 	var priority pgtype.Text
 	err := row.Scan(&priority)
 	return priority, err
+}
+
+const updateEventResult = `-- name: UpdateEventResult :exec
+UPDATE events
+SET result = $2,
+  updated_at = NOW()
+WHERE id = $1
+`
+
+type UpdateEventResultParams struct {
+	ID     string
+	Result pgtype.Text
+}
+
+func (q *Queries) UpdateEventResult(ctx context.Context, arg UpdateEventResultParams) error {
+	_, err := q.db.Exec(ctx, updateEventResult, arg.ID, arg.Result)
+	return err
 }
 
 const updateEventStatus = `-- name: UpdateEventStatus :exec
