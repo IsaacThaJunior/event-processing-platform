@@ -1,6 +1,6 @@
 # Task Queue System (Go + Redis + PostgreSQL)
 
-A resilient background task processing system built in Go. Tasks are submitted via HTTP, queued in Redis by priority, and processed by a worker pool with retries, scheduling, chaining, and cancellation support.
+A resilient background task processing system built in Go. Tasks are submitted via HTTP, queued in Redis by priority, processed by a worker pool with retries, scheduling, chaining, and cancellation. File-producing tasks (image resizing, report generation) upload their output to MinIO and return a presigned download URL.
 
 ---
 
@@ -12,8 +12,10 @@ HTTP Client
     ▼
 ┌─────────────────────────────────────────┐
 │              HTTP API (:8080)           │
-│  POST /tasks       (create task)        │
-│  DELETE /tasks/:id (cancel task)        │
+│  POST   /tasks                          │
+│  DELETE /tasks/:id                      │
+│  GET    /tasks/:id/result               │
+│  GET    /api/admin/*                    │
 └──────────────┬──────────────────────────┘
                │ idempotency check
                │ save event (postgres)
@@ -35,19 +37,21 @@ HTTP Client
 │  │  fetch event from postgres      │    │
 │  │  check cancelled → skip         │    │
 │  │  execute task handler           │    │
+│  │  upload output → MinIO          │    │
+│  │  save result key → postgres     │    │
 │  │  on success → enqueue next task │    │
 │  │  on failure → retry w/ backoff  │    │
 │  │  max retries → DLQ              │    │
 │  └─────────────────────────────────┘    │
-└──────────────┬──────────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────────┐
-│              PostgreSQL                 │
-│  events            (task state)         │
-│  event_delivery_logs (retry history)    │
-│  idempotency_keys  (dedup)              │
-└─────────────────────────────────────────┘
+└──────────┬───────────────┬──────────────┘
+           │               │
+           ▼               ▼
+┌──────────────────┐  ┌────────────────────┐
+│   PostgreSQL     │  │   MinIO (:9000)    │
+│  events          │  │  images/resized/   │
+│  delivery_logs   │  │  reports/          │
+│  idempotency_keys│  └────────────────────┘
+└──────────────────┘
 ```
 
 ---
@@ -57,31 +61,60 @@ HTTP Client
 | Feature | Details |
 |---|---|
 | Priority queues | `high`, `medium`, `low` — workers drain high before low |
-| Scheduled tasks | `execute_at` field defers a task to a future time |
+| Scheduled tasks | `execute_at` defers a task to a future time |
 | Task chaining | `next` field runs tasks sequentially after each succeeds |
 | Task cancellation | `DELETE /tasks/:id` cancels any pending task |
 | Idempotency | Duplicate requests with the same type/payload/priority are rejected |
 | Retry + backoff | Up to 5 attempts: 1s → 2s → 4s → 8s → 16s |
-| Dead letter queue | Tasks exceeding max retries are moved to DLQ |
-| Delivery logs | Every attempt (success, retry, failure) is logged to postgres |
-| Trace IDs | Each request carries a trace ID propagated through logs |
-| Prometheus metrics | Exposed at `/metrics` |
+| Dead letter queue | Tasks exceeding max retries moved to DLQ |
+| Delivery logs | Every attempt (success, retry, failure) logged to Postgres |
+| File storage | File-output tasks upload to MinIO; result retrieved via presigned URL |
+| SSRF protection | Image/URL downloads go through a guard that blocks private IP ranges |
+| Typed task results | Results stored as `{"kind":"file",...}` or `{"kind":"delivery",...}` |
+| Structured logging | Single log line per task with step-level event trail |
+| Distributed tracing | OTel spans propagated from HTTP handler through worker |
+| Prometheus metrics | Tasks processed, failed, retried, duration — exposed at `/metrics` |
+| Graceful shutdown | SIGINT/SIGTERM drains in-flight requests and running tasks before exit |
 
 ---
 
 ## Task Types
 
-| Type | Required payload fields |
+### `resize_image`
+
+Downloads an image from a URL, resizes it, and uploads the result to MinIO.
+
+| Field | Required | Values | Default |
+|---|---|---|---|
+| `image_url` | Yes | Any public HTTPS URL | — |
+| `width` | Yes | `> 0` | — |
+| `height` | Yes | `> 0` | — |
+| `mode` | No | `fit`, `fill`, `stretch` | `fit` |
+| `output_format` | No | `jpeg`, `png` | `jpeg` |
+| `quality` | No | `1–100` (JPEG only) | `85` |
+
+**Resize modes:**
+- `fit` — scales to fit within bounds, preserves aspect ratio
+- `fill` — crops to exact dimensions from center
+- `stretch` — distorts to exact dimensions
+
+### `scrape_url`
+
+| Field | Required |
 |---|---|
-| `resize_image` | `image_url`, `width`, `height` |
-| `scrape_url` | `url` |
-| `generate_report` | `date` |
+| `url` | Yes |
+
+### `generate_report`
+
+| Field | Required |
+|---|---|
+| `date` | Yes |
 
 ---
 
 ## API
 
-### Create a task
+### Submit a task
 
 ```
 POST /tasks
@@ -89,34 +122,44 @@ POST /tasks
 
 ```json
 {
-  "type": "scrape_url",
+  "type": "resize_image",
   "priority": "high",
-  "payload": { "url": "https://example.com" }
-}
-```
-
-Optional fields:
-
-```json
-{
-  "execute_at": "2026-05-01T10:00:00Z",
-  "next": {
-    "type": "generate_report",
-    "priority": "low",
-    "payload": { "date": "2026-05-01" }
+  "payload": {
+    "image_url": "https://picsum.photos/1200/800",
+    "width": 400,
+    "height": 300,
+    "mode": "fit",
+    "output_format": "jpeg",
+    "quality": 85
   }
 }
 ```
 
-**Chaining** — the `next` field is recursive. Tasks in the chain share the same `parent_id` (the root task's ID) and run sequentially after each step succeeds. A failure stops the chain at that step.
+With scheduling and chaining:
+
+```json
+{
+  "type": "scrape_url",
+  "priority": "medium",
+  "payload": { "url": "https://example.com" },
+  "execute_at": "2026-06-01T09:00:00Z",
+  "next": {
+    "type": "generate_report",
+    "priority": "low",
+    "payload": { "date": "2026-06-01" }
+  }
+}
+```
+
+**Chaining** — `next` is recursive. Tasks in the chain share the same `parent_id` and run sequentially. A failure stops the chain at that step.
 
 **Responses:**
 
 | Status | Meaning |
 |---|---|
-| `200` | Task accepted and queued |
-| `400` | Invalid request body or payload |
-| `409` | Duplicate request (idempotency collision) |
+| `200` | Task accepted and queued, returns `event_id` |
+| `400` | Invalid payload |
+| `409` | Duplicate (idempotency collision) |
 | `500` | Internal error |
 
 ---
@@ -127,13 +170,88 @@ Optional fields:
 DELETE /tasks/:id
 ```
 
-Only tasks in `pending` state can be cancelled. Tasks that are already processing, processed, or failed return `409`.
+Only `pending` tasks can be cancelled. Returns `409` for any other status.
 
-**Response:**
+---
+
+### Get task result
+
+```
+GET /tasks/:id/result
+```
+
+Call this after the task status is `processed`. Returns different shapes depending on the task type.
+
+**File-output tasks** (e.g. `resize_image`, `generate_report`):
 
 ```json
-{ "status": "cancelled", "event_id": "..." }
+{
+  "event_id": "abc-123",
+  "kind": "file",
+  "result_url": "http://localhost:9000/images/resized/abc-123.jpeg?X-Amz-...",
+  "expires_in": "24h"
+}
 ```
+
+**Delivery tasks** (e.g. `send_email`):
+
+```json
+{
+  "event_id": "abc-123",
+  "kind": "delivery",
+  "recipient": "user@example.com",
+  "message_id": "msg_xyz"
+}
+```
+
+**Not yet processed** (returns `202`):
+
+```json
+{
+  "event_id": "abc-123",
+  "status": "pending",
+  "message": "task not yet processed"
+}
+```
+
+---
+
+### Admin API
+
+All endpoints under `/api/admin/`.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/admin/dashboard/stats` | Task counts by status, queue depths, worker health |
+| `GET` | `/api/admin/tasks` | Paginated task list (`?page`, `?page_size`, `?status`, `?type`, `?priority`) |
+| `GET` | `/api/admin/tasks/:id` | Single task detail |
+| `GET` | `/api/admin/tasks/:id/retries` | Retry history for a task |
+| `POST` | `/api/admin/tasks/:id/retry` | Re-enqueue a failed or cancelled task |
+| `POST` | `/api/admin/tasks/:id/requeue` | Re-enqueue a pending task orphaned from Redis |
+| `GET` | `/api/admin/dlq` | All tasks in the dead letter queue |
+| `POST` | `/api/admin/dlq/:id/retry` | Move a DLQ task back to the active queue |
+| `DELETE` | `/api/admin/dlq/:id` | Remove a task from the DLQ |
+| `GET` | `/api/admin/queue/depth` | Current depth of each priority queue |
+| `GET` | `/api/admin/workers/health` | Active/idle workers, total processed/failed, uptime |
+
+---
+
+## Polling pattern (frontend)
+
+```
+POST /tasks
+  → store event_id, show "queued" state
+
+poll GET /api/admin/tasks/:id every 2s
+  → show status badge (pending / processed / failed)
+  → when status === "processed":
+
+GET /tasks/:id/result
+  → if kind === "file": show download button with result_url
+  → if kind === "delivery": show confirmation
+```
+
+The `result_url` is a presigned MinIO link valid for 24 hours. Fetch it fresh if the user needs it after expiry.
 
 ---
 
@@ -142,61 +260,88 @@ Only tasks in `pending` state can be cancelled. Tasks that are already processin
 ```
 .
 ├── cmd/
-│   └── main.go                  # wires everything together, registers routes
+│   ├── main.go              # wires everything, graceful shutdown
+│   └── server.go            # chi router, middleware, routes
 ├── internal/
 │   ├── handler/
-│   │   ├── task_handler.go      # HandleCreateTask, HandleCancelTask
-│   │   └── task_sanitizer.go    # payload sanitization
+│   │   ├── task_handler.go  # create, cancel, get result
+│   │   ├── admin_handler.go # admin endpoints
+│   │   └── task_sanitizer.go
 │   ├── worker/
-│   │   └── pool.go              # worker pool, retry logic, task routing
+│   │   ├── pool.go          # worker pool, retry, task routing
+│   │   └── ssrf.go          # SSRF guard for URL downloads
+│   ├── storage/
+│   │   └── minio.go         # MinIO client, upload, presigned URLs
 │   ├── repository/
-│   │   ├── event_repository.go  # postgres event operations
-│   │   └── redis_queue.go       # redis queue operations
+│   │   ├── event_repository.go
+│   │   ├── admin_repository.go
+│   │   └── redis_queue.go
 │   ├── service/
-│   │   ├── idempotency.go       # idempotency key management
-│   │   └── task_validator.go    # per-type payload validation
+│   │   ├── idempotency.go
+│   │   └── task_validator.go
 │   ├── domain/
-│   │   └── queue.go             # Queue interface
+│   │   ├── queue.go         # Queue interface
+│   │   └── worker.go        # WorkerHealthProvider interface
 │   ├── middleware/
-│   │   └── trace.go             # injects trace ID into request context
-│   ├── sender/
-│   │   └── response.go          # JSON response helpers
+│   │   ├── request_logger.go  # structured per-request logging
+│   │   └── trace.go           # OTel trace ID injection
 │   ├── metrics/
-│   │   └── metrics.go           # Prometheus counters and histograms
-│   └── database/                # sqlc-generated code (do not edit)
+│   │   └── metrics.go
+│   ├── telemetry/
+│   │   └── tracer.go
+│   ├── sender/
+│   │   └── response.go
+│   └── database/            # sqlc-generated (do not edit)
 ├── sql/
-│   ├── schema/                  # goose migration files
-│   └── queries/                 # sqlc query definitions
-├── docker-compose.dev.yml
-├── Dockerfile.dev
+│   ├── schema/              # goose migrations
+│   └── queries/             # sqlc query definitions
+├── docker-compose.yml
+├── Dockerfile
 └── go.mod
 ```
 
 ---
 
+## Observability Stack
+
+All services start with `docker compose up`.
+
+| Service | URL | Purpose |
+|---|---|---|
+| App | `localhost:8080` | HTTP API |
+| MinIO API | `localhost:9000` | S3-compatible object storage |
+| MinIO Console | `localhost:9001` | Browse buckets and uploaded files |
+| Prometheus | `localhost:9091` | Metrics scraping |
+| Grafana | `localhost:3000` | Dashboards (Prometheus + Loki + Tempo) |
+| Loki | `localhost:3100` | Log aggregation |
+| Tempo | `localhost:3200` | Distributed trace storage |
+
+Logs from the app are written to `logs/tasks.log` (JSON) and scraped by Promtail into Loki. OTel traces are exported to the collector and forwarded to Tempo.
+
+---
+
 ## How to Run
 
-**1. Start services**
+**1. Copy env and start everything**
 
 ```bash
+cp .env.example .env   # fill in values
 docker compose up --build
 ```
-
-Starts PostgreSQL, Redis, and the application on `:8080`.
 
 **2. Run migrations**
 
 ```bash
-goose -dir ./sql/schema postgres "postgres://user:pass@localhost:5432/db?sslmode=disable" up
+goose -dir ./sql/schema postgres "$DB_URL" up
 ```
 
-**3. Regenerate SQLC code** (only after editing `sql/queries/`)
+**3. Regenerate SQLC** (only after editing `sql/queries/`)
 
 ```bash
 sqlc generate
 ```
 
-**4. Submit a task**
+**4. Submit an image resize task**
 
 ```bash
 curl -X POST http://localhost:8080/tasks \
@@ -204,15 +349,52 @@ curl -X POST http://localhost:8080/tasks \
   -d '{
     "type": "resize_image",
     "priority": "high",
-    "payload": { "image_url": "https://picsum.photos/300", "width": 600, "height": 400 }
+    "payload": {
+      "image_url": "https://picsum.photos/1200/800",
+      "width": 400,
+      "height": 300,
+      "mode": "fit",
+      "output_format": "jpeg",
+      "quality": 85
+    }
   }'
 ```
 
-**5. Check metrics**
+**5. Get the result**
 
+```bash
+# Poll until status is processed
+curl http://localhost:8080/api/admin/tasks/{event_id}
+
+# Then fetch the presigned download URL
+curl http://localhost:8080/tasks/{event_id}/result
 ```
-http://localhost:8080/metrics
+
+---
+
+## Environment Variables
+
+```env
+# Postgres
+DB_URL=postgres://postgres:postgres@postgres:5432/events?sslmode=disable
+
+# Redis
+REDIS_HOST=redis
+REDIS_PORT=6379
+
+# MinIO
+MINIO_ENDPOINT=minio:9000           # internal Docker hostname (server → MinIO)
+MINIO_PUBLIC_ENDPOINT=localhost:9000 # browser-accessible hostname (in presigned URLs)
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=images
+MINIO_USE_SSL=false
+
+# OTel
+OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4318
 ```
+
+`MINIO_ENDPOINT` is what the Go server uses to connect to MinIO inside Docker. `MINIO_PUBLIC_ENDPOINT` is what appears in presigned URLs returned to browsers — set this to your public domain in production.
 
 ---
 
@@ -223,7 +405,7 @@ attempt:  1    2    3    4     5
 delay:    1s → 2s → 4s → 8s → 16s
 ```
 
-After 5 failed attempts the event is moved to the dead letter queue (`events_queue:dlq`) and its status is set to `failed` in postgres.
+After 5 failed attempts the task is moved to the DLQ and its status is set to `failed`. DLQ tasks can be retried or deleted via the admin API.
 
 ---
 
@@ -232,20 +414,26 @@ After 5 failed attempts the event is moved to the dead letter queue (`events_que
 | Decision | Why | Trade-off |
 |---|---|---|
 | Redis lists + sorted set | Simple priority queue with scheduled task support | No built-in durability; at-least-once delivery |
-| Idempotency keys in postgres | Dedup across restarts | Extra DB read on every request |
-| Worker pool (fixed size) | Controlled concurrency, predictable DB load | Requires tuning for throughput |
+| Idempotency keys in Postgres | Dedup survives restarts | Extra DB read on every request |
+| Worker pool (fixed size) | Controlled concurrency, predictable DB connection load | Requires tuning for throughput |
 | Task chaining via `next` | Sequential pipelines in a single request | Chain stops on first failure |
 | `parent_id` = root task ID | All chain members traceable to origin in O(1) | Slightly denormalized |
-| Exponential backoff | Protect downstream on transient failures | Slower recovery at high retry counts |
+| Exponential backoff | Protects downstream on transient failures | Slower recovery at high retry counts |
 | SQLC | Compile-time SQL validation, no ORM overhead | Must regenerate after query changes |
+| MinIO for file output | S3-compatible, runs locally in Docker, same API in prod | Adds a service dependency |
+| Typed result JSON | `{"kind":"file",...}` lets one endpoint serve all task types | Workers must set `kind` correctly |
+| SSRF guard via custom dialer | Blocks private IPs at dial time, prevents DNS rebinding | Adds latency for URL downloads |
+| `MINIO_PUBLIC_ENDPOINT` | Decouples internal hostname from browser-facing URLs | Requires two env vars instead of one |
+| Graceful shutdown with 10s drain | In-flight requests and running tasks finish before process exits | Longer deploy cycle; use shorter timeout if needed |
 
 ---
 
-## Production Considerations
+## Production Checklist
 
-- Use Redis Streams or Kafka for stronger delivery guarantees (ordered, replayable)
-- Add distributed tracing (OpenTelemetry) for cross-service visibility
-- Externalize configuration (env vars or config file)
-- Add authentication on the HTTP layer
-- Monitor the DLQ — a growing DLQ means a systemic processing failure
-- Scale workers horizontally; the pool size should be tuned to DB connection pool limits
+- [ ] Add authentication on `/api/admin/*` (currently open)
+- [ ] Run goose migrations automatically on startup
+- [ ] Set `MINIO_PUBLIC_ENDPOINT` to your public storage domain
+- [ ] Use Redis Streams or a dedicated queue (asynq, river) for stronger delivery guarantees
+- [ ] Tune worker pool size against DB connection pool limits
+- [ ] Monitor the DLQ — a growing DLQ means a systemic processing failure
+- [ ] Rotate MinIO credentials and restrict bucket policy

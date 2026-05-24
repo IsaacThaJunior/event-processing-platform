@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -242,8 +243,29 @@ func errorAttrs(err error) []slog.Attr {
 	// Conditionally append stack trace if present
 	var stackErr stackTracer
 	if errors.As(err, &stackErr) {
-		attrs = append(attrs, slog.String("stack_trace", fmt.Sprintf("%+v", stackErr.StackTrace())))
+		if filtered := filterStack(fmt.Sprintf("%+v", stackErr.StackTrace())); filtered != "" {
+			attrs = append(attrs, slog.String("stack_trace", filtered))
+		}
 	}
 
 	return attrs
+}
+
+// filterStack keeps only frames that belong to this module, dropping stdlib,
+// chi, pgx, and other dependency frames that add noise without adding context.
+func filterStack(full string) string {
+	var kept []string
+	lines := strings.Split(full, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "github.com/isaacthajunior/") || strings.HasPrefix(trimmed, "main.") {
+			kept = append(kept, line)
+			if i+1 < len(lines) {
+				i++
+				kept = append(kept, lines[i])
+			}
+		}
+	}
+	return strings.Join(kept, "\n")
 }
