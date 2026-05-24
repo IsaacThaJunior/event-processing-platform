@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/isaacthajunior/mid-prod/internal/database"
@@ -38,6 +40,12 @@ func run(port int) int {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		return 1
 	}
+	// Registered first so it runs last — log file stays open until everything else is done.
+	defer func() {
+		if err := closeFunc(); err != nil {
+			fmt.Fprintf(os.Stderr, "error closing log file: %v\n", err)
+		}
+	}()
 
 	otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if otelEndpoint == "" {
@@ -55,23 +63,15 @@ func run(port int) int {
 		log.Fatalf("failed to connect to db: %v", err)
 	}
 	log.Println("Connected to Postgres successfully")
-
 	defer pool.Close()
 
-	// Initialize queries from DB
 	queries := database.New(pool)
-
-	// Create event repo
 	eventRepo := repository.NewEventRepository(queries)
-
-	// Create the idempotency service
 	idempotencyService := service.NewIdempotencyService(queries, pool)
 
-	// This for Redis Client
 	redisClient := repository.NewRedisClient()
 	defer redisClient.Close()
 
-	// This is for Redis queue
 	queue := repository.NewRedisQueue(redisClient, "events_queue")
 	validator := service.NewTaskValidator()
 
@@ -84,17 +84,14 @@ func run(port int) int {
 		}
 	}
 
-	// --- Worker pool ---
+	// Worker pool must stop before Redis/Postgres close, so defer it last (runs first).
 	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger, validator, storageClient)
 	workerPool.Start()
 	defer workerPool.Stop()
 
 	metrics.Init()
 
-	// Task handler
 	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, validator, storageClient)
-
-	// Admin handler
 	adminRepo := repository.NewAdminRepository(queries)
 	adminHandler := handler.NewAdminHandler(adminRepo, queue, workerPool)
 
@@ -106,16 +103,37 @@ func run(port int) int {
 		IdleTimeout:  time.Minute,
 	}
 
-	logger.Debug("server started", "port", port)
-	if err = srv.ListenAndServe(); err != nil {
+	// Start server in background so we can listen for signals below.
+	serverErr := make(chan error, 1)
+	go func() {
+		logger.Info("server started", "port", port)
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
+		logger.Error("server error", "error", err)
+		return 1
+	case sig := <-quit:
+		logger.Info("shutdown signal received", "signal", sig.String())
+	}
+
+	// Give in-flight HTTP requests up to 10 seconds to complete.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("server forced to shutdown", "error", err)
 		return 1
 	}
 
-	defer func() {
-		if err := closeFunc(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error closing log file: %v\n", err)
-		}
-	}()
+	logger.Info("server stopped cleanly")
+	// Deferred cleanup (workerPool.Stop, redisClient.Close, pool.Close, tp.Shutdown, closeFunc) runs here.
 	return 0
 }
 

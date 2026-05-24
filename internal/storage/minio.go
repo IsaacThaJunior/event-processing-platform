@@ -5,22 +5,30 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 type Client struct {
-	mc     *minio.Client
-	bucket string
+	mc             *minio.Client
+	bucket         string
+	internalHost   string // e.g. "minio:9000"  — used for connection
+	publicHost     string // e.g. "localhost:9000" — used in presigned URLs returned to browsers
 }
 
 func NewMinioClient() (*Client, error) {
 	endpoint := os.Getenv("MINIO_ENDPOINT")
+	publicEndpoint := os.Getenv("MINIO_PUBLIC_ENDPOINT")
 	accessKey := os.Getenv("MINIO_ACCESS_KEY")
 	secretKey := os.Getenv("MINIO_SECRET_KEY")
 	bucket := os.Getenv("MINIO_BUCKET")
 	useSSL := os.Getenv("MINIO_USE_SSL") == "true"
+
+	if publicEndpoint == "" {
+		publicEndpoint = endpoint
+	}
 
 	mc, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
@@ -30,7 +38,12 @@ func NewMinioClient() (*Client, error) {
 		return nil, fmt.Errorf("minio: connect: %w", err)
 	}
 
-	return &Client{mc: mc, bucket: bucket}, nil
+	return &Client{
+		mc:           mc,
+		bucket:       bucket,
+		internalHost: endpoint,
+		publicHost:   publicEndpoint,
+	}, nil
 }
 
 // EnsureBucket creates the bucket if it does not already exist.
@@ -60,10 +73,16 @@ func (c *Client) Upload(ctx context.Context, key, contentType string, r io.Reade
 }
 
 // PresignedURL returns a time-limited URL the caller can use to download the object.
+// The host is rewritten from the internal Docker hostname to the public-facing one
+// so browsers outside the Docker network can resolve it.
 func (c *Client) PresignedURL(ctx context.Context, key string) (string, error) {
-	url, err := c.mc.PresignedGetObject(ctx, c.bucket, key, 24*60*60*1e9, nil) // 24h
+	u, err := c.mc.PresignedGetObject(ctx, c.bucket, key, 24*60*60*1e9, nil) // 24h
 	if err != nil {
 		return "", fmt.Errorf("minio: presign %s: %w", key, err)
 	}
-	return url.String(), nil
+	raw := u.String()
+	if c.internalHost != c.publicHost {
+		raw = strings.Replace(raw, c.internalHost, c.publicHost, 1)
+	}
+	return raw, nil
 }
