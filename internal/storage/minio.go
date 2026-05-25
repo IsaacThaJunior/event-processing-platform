@@ -30,19 +30,25 @@ func NewMinioClient() (*Client, error) {
 		slog.Warn("MINIO_PUBLIC_ENDPOINT not set — presigned URLs will use the internal Docker hostname and won't be reachable from a browser; set MINIO_PUBLIC_ENDPOINT=localhost:9000")
 	}
 
+	region := os.Getenv("MINIO_REGION")
+	if region == "" {
+		region = "us-east-1" // MinIO default
+	}
+
 	creds := credentials.NewStaticV4(accessKey, secretKey, "")
 
-	mc, err := minio.New(endpoint, &minio.Options{Creds: creds, Secure: useSSL})
+	mc, err := minio.New(endpoint, &minio.Options{Creds: creds, Secure: useSSL, Region: region})
 	if err != nil {
 		return nil, fmt.Errorf("minio: connect: %w", err)
 	}
 
 	// publicMC signs presigned URLs with the browser-facing hostname so the
 	// AWS Signature V4 matches when the browser sends the download request.
-	// If both endpoints are the same there is no need for a second connection.
+	// Region must be set explicitly so the SDK does not call GetBucketLocation —
+	// that call would go to localhost:9000 which is unreachable from inside Docker.
 	publicMC := mc
 	if publicEndpoint != endpoint {
-		publicMC, err = minio.New(publicEndpoint, &minio.Options{Creds: creds, Secure: useSSL})
+		publicMC, err = minio.New(publicEndpoint, &minio.Options{Creds: creds, Secure: useSSL, Region: region})
 		if err != nil {
 			return nil, fmt.Errorf("minio: connect public client: %w", err)
 		}
