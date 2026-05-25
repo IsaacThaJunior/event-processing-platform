@@ -34,6 +34,16 @@ var (
 			Buckets: prometheus.DefBuckets,
 		},
 	)
+
+	// QueueDepth tracks the live depth of each queue (high, medium, low, scheduled, dlq).
+	// A non-zero dlq value means tasks have exhausted all retries and need manual intervention.
+	QueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "queue_depth_current",
+			Help: "Current number of tasks in each queue",
+		},
+		[]string{"queue"},
+	)
 )
 
 func Init() {
@@ -41,4 +51,5 @@ func Init() {
 	prometheus.MustRegister(TasksFailed)
 	prometheus.MustRegister(TasksRetried)
 	prometheus.MustRegister(TaskDuration)
+	prometheus.MustRegister(QueueDepth)
 }

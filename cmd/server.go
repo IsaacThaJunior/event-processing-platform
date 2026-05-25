@@ -49,6 +49,7 @@ func newServer(adminHandler *handler.AdminHandler, taskHandler *handler.TaskHand
 		r.Get("/dashboard/stats", adminHandler.HandleDashboardStats)
 		r.Get("/tasks", adminHandler.HandleListTasks)
 		r.Get("/tasks/{id}", adminHandler.HandleGetTask)
+		r.Get("/tasks/{id}/children", adminHandler.HandleGetTaskChildren)
 		r.Get("/tasks/{id}/retries", adminHandler.HandleGetTaskRetries)
 		r.Post("/tasks/{id}/retry", adminHandler.HandleRetryTask)
 		r.Post("/tasks/{id}/requeue", adminHandler.HandleRequeueTask)

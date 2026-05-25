@@ -73,6 +73,12 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("missing type"))
 		return
 	}
+	if req.Type == "generate_report" {
+		err := fmt.Errorf("generate_report cannot be submitted directly; use scrape_url with next.type=generate_report")
+		logCtx.AddEvent("generate_report_direct_submit", "failed", err)
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
+		return
+	}
 	if len(req.Payload) == 0 {
 		logCtx.AddEvent("request_payload_empty", "failed", fmt.Errorf("missing payload"))
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("missing payload"))

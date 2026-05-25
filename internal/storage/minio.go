@@ -4,18 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 type Client struct {
-	mc             *minio.Client
-	bucket         string
-	internalHost   string // e.g. "minio:9000"  — used for connection
-	publicHost     string // e.g. "localhost:9000" — used in presigned URLs returned to browsers
+	mc       *minio.Client // internal endpoint — Upload, Download, EnsureBucket
+	publicMC *minio.Client // public endpoint — PresignedGetObject (signature must match browser-facing host)
+	bucket   string
 }
 
 func NewMinioClient() (*Client, error) {
@@ -28,21 +27,31 @@ func NewMinioClient() (*Client, error) {
 
 	if publicEndpoint == "" {
 		publicEndpoint = endpoint
+		slog.Warn("MINIO_PUBLIC_ENDPOINT not set — presigned URLs will use the internal Docker hostname and won't be reachable from a browser; set MINIO_PUBLIC_ENDPOINT=localhost:9000")
 	}
 
-	mc, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: useSSL,
-	})
+	creds := credentials.NewStaticV4(accessKey, secretKey, "")
+
+	mc, err := minio.New(endpoint, &minio.Options{Creds: creds, Secure: useSSL})
 	if err != nil {
 		return nil, fmt.Errorf("minio: connect: %w", err)
 	}
 
+	// publicMC signs presigned URLs with the browser-facing hostname so the
+	// AWS Signature V4 matches when the browser sends the download request.
+	// If both endpoints are the same there is no need for a second connection.
+	publicMC := mc
+	if publicEndpoint != endpoint {
+		publicMC, err = minio.New(publicEndpoint, &minio.Options{Creds: creds, Secure: useSSL})
+		if err != nil {
+			return nil, fmt.Errorf("minio: connect public client: %w", err)
+		}
+	}
+
 	return &Client{
-		mc:           mc,
-		bucket:       bucket,
-		internalHost: endpoint,
-		publicHost:   publicEndpoint,
+		mc:       mc,
+		publicMC: publicMC,
+		bucket:   bucket,
 	}, nil
 }
 
@@ -72,17 +81,22 @@ func (c *Client) Upload(ctx context.Context, key, contentType string, r io.Reade
 	return key, nil
 }
 
+// Download returns the object body for the given key. Caller must close the returned ReadCloser.
+func (c *Client) Download(ctx context.Context, key string) (io.ReadCloser, error) {
+	obj, err := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("minio: download %s: %w", key, err)
+	}
+	return obj, nil
+}
+
 // PresignedURL returns a time-limited URL the caller can use to download the object.
-// The host is rewritten from the internal Docker hostname to the public-facing one
-// so browsers outside the Docker network can resolve it.
+// Uses publicMC so the AWS Signature V4 is computed against the browser-facing hostname
+// from the start — replacing the host after signing breaks the signature.
 func (c *Client) PresignedURL(ctx context.Context, key string) (string, error) {
-	u, err := c.mc.PresignedGetObject(ctx, c.bucket, key, 24*60*60*1e9, nil) // 24h
+	u, err := c.publicMC.PresignedGetObject(ctx, c.bucket, key, 24*60*60*1e9, nil) // 24h
 	if err != nil {
 		return "", fmt.Errorf("minio: presign %s: %w", key, err)
 	}
-	raw := u.String()
-	if c.internalHost != c.publicHost {
-		raw = strings.Replace(raw, c.internalHost, c.publicHost, 1)
-	}
-	return raw, nil
+	return u.String(), nil
 }

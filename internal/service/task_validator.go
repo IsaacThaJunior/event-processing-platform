@@ -56,14 +56,11 @@ func (v *TaskValidator) Validate(taskType string, payload json.RawMessage) error
 		return nil
 
 	case "generate_report":
-		var p struct {
-			Date string `json:"date"`
-		}
+		// Payload is injected by the system after scrape_url completes.
+		// At submission time the user provides no payload; only validate it is parseable JSON.
+		var p map[string]json.RawMessage
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return errors.New("invalid payload format for generate_report")
-		}
-		if p.Date == "" {
-			return errors.New("date is required")
 		}
 		return nil
 

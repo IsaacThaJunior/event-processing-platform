@@ -7,7 +7,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func NewPool() (*pgxpool.Pool, error) {
+// NewPool creates a pgxpool sized to the given worker count.
+// MaxConns = workers * 3 covers worker DB activity plus HTTP handler overhead.
+func NewPool(workerCount int) (*pgxpool.Pool, error) {
 	dbURL := os.Getenv("DB_URL")
-	return pgxpool.New(context.Background(), dbURL)
+	cfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConns = int32(workerCount * 3)
+	cfg.MinConns = int32(workerCount)
+	return pgxpool.NewWithConfig(context.Background(), cfg)
 }

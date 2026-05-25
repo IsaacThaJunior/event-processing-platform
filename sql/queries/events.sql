@@ -71,3 +71,9 @@ SET status = 'pending',
 WHERE id = $1
   AND status IN ('failed', 'cancelled')
 RETURNING priority;
+
+-- name: ListEventsByParentID :many
+SELECT *
+FROM events
+WHERE parentid = $1
+ORDER BY created_at ASC;

@@ -2,8 +2,9 @@
 package worker
 
 import (
-	"context"
 	"bytes"
+	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -16,12 +17,12 @@ import (
 	"time"
 
 	"github.com/disintegration/imaging"
-
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	"golang.org/x/net/html"
 
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/domain"
@@ -90,6 +91,9 @@ func (p *WorkerPool) Start() {
 	p.wg.Add(1)
 	go p.scheduler()
 
+	p.wg.Add(1)
+	go p.dlqMonitor()
+
 	for i := 0; i < p.workers; i++ {
 		p.wg.Add(1)
 		go p.worker(i)
@@ -108,6 +112,34 @@ func (p *WorkerPool) scheduler() {
 		case <-ticker.C:
 			if err := p.queue.PromoteScheduled(); err != nil {
 				p.logger.Debug("scheduler: failed to promote scheduled tasks", "error", err)
+			}
+		}
+	}
+}
+
+// dlqMonitor polls queue depths every 30s, updates Prometheus gauges, and logs
+// a warning whenever the DLQ is non-empty — a growing DLQ signals systemic failure.
+func (p *WorkerPool) dlqMonitor() {
+	defer p.wg.Done()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			depths, err := p.queue.GetQueueDepths()
+			if err != nil {
+				p.logger.Debug("dlqMonitor: failed to get queue depths", "error", err)
+				continue
+			}
+			for queue, depth := range depths {
+				metrics.QueueDepth.WithLabelValues(queue).Set(float64(depth))
+			}
+			if dlq := depths["dlq"]; dlq > 0 {
+				p.logger.Warn("DLQ is non-empty — tasks have exhausted all retries and need attention",
+					"dlq_depth", dlq)
 			}
 		}
 	}
@@ -206,7 +238,7 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 		}
 
 		execStart := time.Now()
-		err = p.executeTask(ctx, eventID, task, logCtx)
+		extra, err := p.executeTask(ctx, eventID, task, logCtx)
 		metrics.TaskDuration.Observe(time.Since(execStart).Seconds())
 
 		if err == nil {
@@ -224,6 +256,13 @@ func (p *WorkerPool) processWithRetry(eventID string, workerID int, queueName st
 			}
 
 			if task.Next != nil {
+				// Merge any extra data from this task (e.g. scraped_key from scrape_url)
+				// into the next task's payload before enqueuing.
+				if len(extra) > 0 {
+					if merged, mergeErr := mergeRawJSON(task.Next.Payload, extra); mergeErr == nil {
+						task.Next.Payload = merged
+					}
+				}
 				if err := p.enqueueNextTask(ctx, event, task.Next, event.TraceID); err != nil {
 					logCtx.AddEvent("enqueue_next_task", "failed", err)
 				} else {
@@ -299,20 +338,28 @@ func (p *WorkerPool) emitLog(ctx context.Context, logCtx *middleware.LogContext,
 	p.logger.Info("task processed", attrs...)
 }
 
-func (p *WorkerPool) executeTask(ctx context.Context, eventID string, task handler.TaskRequest, logCtx *middleware.LogContext) error {
+func (p *WorkerPool) executeTask(ctx context.Context, eventID string, task handler.TaskRequest, logCtx *middleware.LogContext) (json.RawMessage, error) {
 	switch task.Type {
 	case "resize_image":
 		payload, err := injectTaskID(task.Payload, eventID)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		return p.handleResizeImage(ctx, payload, logCtx)
+		return nil, p.handleResizeImage(ctx, payload, logCtx)
 	case "scrape_url":
-		return p.handleScrapeURL(ctx, task.Payload)
+		payload, err := injectTaskID(task.Payload, eventID)
+		if err != nil {
+			return nil, err
+		}
+		return p.handleScrapeURL(ctx, payload)
 	case "generate_report":
-		return p.handleGenerateReport(ctx, task.Payload)
+		payload, err := injectTaskID(task.Payload, eventID)
+		if err != nil {
+			return nil, err
+		}
+		return nil, p.handleGenerateReport(ctx, payload)
 	default:
-		return fmt.Errorf("unknown command: %v", task.Type)
+		return nil, fmt.Errorf("unknown command: %v", task.Type)
 	}
 }
 
@@ -441,38 +488,199 @@ func (p *WorkerPool) handleResizeImage(ctx context.Context, payload []byte, logC
 	return nil
 }
 
-func (p *WorkerPool) handleScrapeURL(ctx context.Context, payload []byte) error {
+// mergeRawJSON merges extra key/value pairs into base JSON. Used to forward
+// task output (e.g. scraped_key) into the next chained task's payload.
+func mergeRawJSON(base, extra json.RawMessage) (json.RawMessage, error) {
+	m := make(map[string]json.RawMessage)
+	if len(base) > 0 {
+		if err := json.Unmarshal(base, &m); err != nil {
+			return base, err
+		}
+	}
+	var extras map[string]json.RawMessage
+	if err := json.Unmarshal(extra, &extras); err != nil {
+		return base, err
+	}
+	for k, v := range extras {
+		m[k] = v
+	}
+	return json.Marshal(m)
+}
+
+type scrapedPage struct {
+	URL        string   `json:"url"`
+	Title      string   `json:"title"`
+	Headings   []string `json:"headings"`
+	Paragraphs []string `json:"paragraphs"`
+	Links      []string `json:"links"`
+	ScrapedAt  string   `json:"scraped_at"`
+}
+
+func (p *WorkerPool) handleScrapeURL(ctx context.Context, payload []byte) (json.RawMessage, error) {
 	var params struct {
-		URL string `json:"url"`
+		URL    string `json:"url"`
+		TaskID string `json:"task_id"`
 	}
-	if err := json.Unmarshal([]byte(payload), &params); err != nil {
-		return fmt.Errorf("failed to parse scrape params: %w", err)
+	if err := json.Unmarshal(payload, &params); err != nil {
+		return nil, fmt.Errorf("scrape: parse params: %w", err)
 	}
-
 	if params.URL == "" {
-		return fmt.Errorf("url is required")
+		return nil, fmt.Errorf("scrape: url is required")
+	}
+	if p.storage == nil {
+		return nil, fmt.Errorf("scrape: storage client not configured")
 	}
 
-	fmt.Printf("🔍 [Job] Scraping URL %s \n", params.URL)
+	resp, err := safeHTTPClient(30).Get(params.URL)
+	if err != nil {
+		return nil, fmt.Errorf("scrape: fetch %s: %w", params.URL, err)
+	}
+	defer resp.Body.Close()
 
-	// TODO: Implement actual URL scraping logic here
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("scrape: unexpected status %d for %s", resp.StatusCode, params.URL)
+	}
 
-	return nil
+	doc, err := html.Parse(io.LimitReader(resp.Body, 5<<20))
+	if err != nil {
+		return nil, fmt.Errorf("scrape: parse html: %w", err)
+	}
+
+	page := extractPage(doc, params.URL)
+
+	data, err := json.Marshal(page)
+	if err != nil {
+		return nil, fmt.Errorf("scrape: marshal: %w", err)
+	}
+
+	key := fmt.Sprintf("scraped/%s.json", params.TaskID)
+	if _, err := p.storage.Upload(ctx, key, "application/json", bytes.NewReader(data), int64(len(data))); err != nil {
+		return nil, fmt.Errorf("scrape: upload: %w", err)
+	}
+
+	resultJSON, _ := json.Marshal(map[string]string{"kind": "file", "key": key})
+	if err := p.repo.UpdateEventResult(ctx, params.TaskID, string(resultJSON)); err != nil {
+		return nil, fmt.Errorf("scrape: save result: %w", err)
+	}
+
+	// Return scraped_key so processWithRetry can forward it into generate_report's payload.
+	extra, _ := json.Marshal(map[string]string{"scraped_key": key})
+	return extra, nil
 }
 
 func (p *WorkerPool) handleGenerateReport(ctx context.Context, payload []byte) error {
 	var params struct {
-		Date string `json:"date"`
+		TaskID     string `json:"task_id"`
+		ScrapedKey string `json:"scraped_key"`
 	}
-	if err := json.Unmarshal([]byte(payload), &params); err != nil {
-		return fmt.Errorf("failed to parse report params: %w", err)
+	if err := json.Unmarshal(payload, &params); err != nil {
+		return fmt.Errorf("report: parse params: %w", err)
+	}
+	if params.ScrapedKey == "" {
+		return fmt.Errorf("report: scraped_key is required; submit scrape_url with next.type=generate_report")
+	}
+	if p.storage == nil {
+		return fmt.Errorf("report: storage client not configured")
 	}
 
-	fmt.Printf("📊 [Job] Generating report for date %s \n", params.Date)
+	rc, err := p.storage.Download(ctx, params.ScrapedKey)
+	if err != nil {
+		return fmt.Errorf("report: download scraped data: %w", err)
+	}
+	defer rc.Close()
 
-	// TODO: Implement actual report generation logic here
+	var page scrapedPage
+	if err := json.NewDecoder(rc).Decode(&page); err != nil {
+		return fmt.Errorf("report: decode scraped data: %w", err)
+	}
+
+	var buf bytes.Buffer
+	w := csv.NewWriter(&buf)
+	_ = w.Write([]string{"section", "content"})
+	_ = w.Write([]string{"url", page.URL})
+	_ = w.Write([]string{"title", page.Title})
+	_ = w.Write([]string{"scraped_at", page.ScrapedAt})
+	for _, h := range page.Headings {
+		_ = w.Write([]string{"heading", h})
+	}
+	for _, para := range page.Paragraphs {
+		_ = w.Write([]string{"paragraph", para})
+	}
+	for _, link := range page.Links {
+		_ = w.Write([]string{"link", link})
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return fmt.Errorf("report: write csv: %w", err)
+	}
+
+	key := fmt.Sprintf("reports/%s.csv", params.TaskID)
+	if _, err := p.storage.Upload(ctx, key, "text/csv", &buf, int64(buf.Len())); err != nil {
+		return fmt.Errorf("report: upload: %w", err)
+	}
+
+	resultJSON, _ := json.Marshal(map[string]string{"kind": "file", "key": key})
+	if err := p.repo.UpdateEventResult(ctx, params.TaskID, string(resultJSON)); err != nil {
+		return fmt.Errorf("report: save result: %w", err)
+	}
 
 	return nil
+}
+
+// extractPage walks an HTML document and pulls out title, headings, paragraphs, and links.
+func extractPage(doc *html.Node, pageURL string) scrapedPage {
+	page := scrapedPage{URL: pageURL, ScrapedAt: time.Now().UTC().Format(time.RFC3339)}
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "script", "style":
+				return
+			case "title":
+				if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
+					page.Title = strings.TrimSpace(n.FirstChild.Data)
+				}
+			case "h1", "h2", "h3":
+				if text := extractText(n); text != "" {
+					page.Headings = append(page.Headings, text)
+				}
+			case "p":
+				text := extractText(n)
+				if len(text) >= 20 {
+					if len(text) > 300 {
+						text = text[:300]
+					}
+					page.Paragraphs = append(page.Paragraphs, text)
+				}
+			case "a":
+				for _, attr := range n.Attr {
+					if attr.Key == "href" && strings.HasPrefix(attr.Val, "http") {
+						page.Links = append(page.Links, attr.Val)
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return page
+}
+
+func extractText(n *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			b.WriteString(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return strings.TrimSpace(b.String())
 }
 
 func (p *WorkerPool) enqueueNextTask(

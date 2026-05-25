@@ -207,6 +207,45 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 	return items, nil
 }
 
+const listEventsByParentID = `-- name: ListEventsByParentID :many
+SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at, result
+FROM events
+WHERE parentid = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListEventsByParentID(ctx context.Context, parentid pgtype.Text) ([]Event, error) {
+	rows, err := q.db.Query(ctx, listEventsByParentID, parentid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Event
+	for rows.Next() {
+		var i Event
+		if err := rows.Scan(
+			&i.ID,
+			&i.Type,
+			&i.Payload,
+			&i.CreatedAt,
+			&i.Status,
+			&i.UpdatedAt,
+			&i.TraceID,
+			&i.Priority,
+			&i.Parentid,
+			&i.ScheduledAt,
+			&i.Result,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEventsFiltered = `-- name: ListEventsFiltered :many
 SELECT id, type, payload, created_at, status, updated_at, trace_id, priority, parentid, scheduled_at, result
 FROM events

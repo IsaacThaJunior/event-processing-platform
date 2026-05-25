@@ -74,6 +74,10 @@ func (r *AdminRepository) GetEventByID(ctx context.Context, id string) (database
 	return r.q.GetEventByID(ctx, id)
 }
 
+func (r *AdminRepository) GetChildTasks(ctx context.Context, parentID string) ([]database.Event, error) {
+	return r.q.ListEventsByParentID(ctx, pgtype.Text{String: parentID, Valid: parentID != ""})
+}
+
 func (r *AdminRepository) GetStatusCounts(ctx context.Context) ([]StatusCount, error) {
 	rows, err := r.q.GetEventStatusCounts(ctx)
 	if err != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,9 +25,11 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/telemetry"
 	"github.com/isaacthajunior/mid-prod/internal/worker"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 	pkgerr "github.com/pkg/errors"
+	"github.com/pressly/goose/v3"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -56,21 +60,44 @@ func run(port int) int {
 	if err != nil {
 		logger.Warn("traces disabled — could not reach OTel Collector", "error", err)
 	} else {
-		defer tp.Shutdown(context.Background()) //nolint:errcheck
+		defer tp.Shutdown(context.Background())
 	}
 
-	pool, err := database.NewPool()
+	// Run migrations before opening the pgxpool — goose needs *sql.DB, not pgxpool.
+	migrationDB, err := sql.Open("pgx", os.Getenv("DB_URL"))
+	if err != nil {
+		log.Fatalf("goose: open db: %v", err)
+	}
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("postgres"); err != nil {
+		log.Fatalf("goose: set dialect: %v", err)
+	}
+	if err := goose.Up(migrationDB, "./sql/schema"); err != nil {
+		log.Fatalf("goose: migrations failed: %v", err)
+	}
+	migrationDB.Close()
+	logger.Debug("database migrations applied")
+
+	workerCount := 3
+	if v := os.Getenv("WORKER_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			workerCount = n
+		}
+	}
+	logger.Debug("worker pool configured", "workers", workerCount, "db_max_conns", workerCount*3)
+
+	pool, err := database.NewPool(workerCount)
 	if err != nil {
 		log.Fatalf("failed to connect to db: %v", err)
 	}
-	log.Println("Connected to Postgres successfully")
+	logger.Debug("Connected to Postgres successfully")
 	defer pool.Close()
 
 	queries := database.New(pool)
 	eventRepo := repository.NewEventRepository(queries)
 	idempotencyService := service.NewIdempotencyService(queries, pool)
 
-	redisClient := repository.NewRedisClient()
+	redisClient := repository.NewRedisClient(logger)
 	defer redisClient.Close()
 
 	queue := repository.NewRedisQueue(redisClient, "events_queue")
@@ -86,7 +113,7 @@ func run(port int) int {
 	}
 
 	// Worker pool must stop before Redis/Postgres close, so defer it last (runs first).
-	workerPool := worker.NewWorkerPool(queue, eventRepo, 3, logger, validator, storageClient)
+	workerPool := worker.NewWorkerPool(queue, eventRepo, workerCount, logger, validator, storageClient)
 	workerPool.Start()
 	defer workerPool.Stop()
 
@@ -107,7 +134,7 @@ func run(port int) int {
 	// Start server in background so we can listen for signals below.
 	serverErr := make(chan error, 1)
 	go func() {
-		logger.Info("server started", "port", port)
+		logger.Debug("server started", "port", port)
 		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}

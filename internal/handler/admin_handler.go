@@ -182,6 +182,33 @@ func (h *AdminHandler) HandleGetTask(w http.ResponseWriter, r *http.Request) {
 	sender.RespondWithJSON(w, http.StatusOK, toTaskResponse(event))
 }
 
+// GET /api/admin/tasks/{id}/children — returns all tasks chained after the given task.
+// Use this to find the generate_report task that was automatically enqueued after a scrape_url.
+func (h *AdminHandler) HandleGetTaskChildren(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("id required"))
+		return
+	}
+
+	children, err := h.adminRepo.GetChildTasks(ctx, id)
+	if err != nil {
+		sender.RespondWithError(ctx, w, http.StatusInternalServerError, err)
+		return
+	}
+
+	tasks := make([]taskResponse, 0, len(children))
+	for _, e := range children {
+		tasks = append(tasks, toTaskResponse(e))
+	}
+
+	sender.RespondWithJSON(w, http.StatusOK, map[string]any{
+		"parent_id": id,
+		"children":  tasks,
+	})
+}
+
 // GET /api/admin/tasks/{id}/retries
 func (h *AdminHandler) HandleGetTaskRetries(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()

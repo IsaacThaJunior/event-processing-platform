@@ -100,15 +100,19 @@ Downloads an image from a URL, resizes it, and uploads the result to MinIO.
 
 ### `scrape_url`
 
+Fetches a URL, parses the HTML, and stores a structured JSON snapshot (title, headings, paragraphs, links) in MinIO under `scraped/{task_id}.json`. The result is accessible as a presigned download URL.
+
+Can be submitted standalone or with `next.type=generate_report` to automatically produce a CSV report from the scraped content.
+
 | Field | Required |
 |---|---|
-| `url` | Yes |
+| `url` | Yes — any public HTTPS URL |
 
 ### `generate_report`
 
-| Field | Required |
-|---|---|
-| `date` | Yes |
+**Cannot be submitted directly.** Must be chained as the `next` step after `scrape_url`. The system automatically injects the scraped data key into its payload after scraping completes.
+
+Reads the scraped JSON from MinIO, formats the content as a CSV (URL, title, headings, paragraphs, links), and uploads it to MinIO under `reports/{task_id}.csv`. The result is accessible as a presigned download URL.
 
 ---
 
@@ -135,7 +139,31 @@ POST /tasks
 }
 ```
 
-With scheduling and chaining:
+Scrape a URL and generate a report from it:
+
+```json
+{
+  "type": "scrape_url",
+  "priority": "medium",
+  "payload": { "url": "https://example.com" },
+  "next": {
+    "type": "generate_report",
+    "priority": "low"
+  }
+}
+```
+
+Scrape only (no report):
+
+```json
+{
+  "type": "scrape_url",
+  "priority": "medium",
+  "payload": { "url": "https://example.com" }
+}
+```
+
+With scheduling:
 
 ```json
 {
@@ -145,8 +173,7 @@ With scheduling and chaining:
   "execute_at": "2026-06-01T09:00:00Z",
   "next": {
     "type": "generate_report",
-    "priority": "low",
-    "payload": { "date": "2026-06-01" }
+    "priority": "low"
   }
 }
 ```
@@ -225,6 +252,7 @@ All endpoints under `/api/admin/`.
 | `GET` | `/api/admin/dashboard/stats` | Task counts by status, queue depths, worker health |
 | `GET` | `/api/admin/tasks` | Paginated task list (`?page`, `?page_size`, `?status`, `?type`, `?priority`) |
 | `GET` | `/api/admin/tasks/:id` | Single task detail |
+| `GET` | `/api/admin/tasks/:id/children` | Tasks chained after this task (e.g. the `generate_report` that ran after a `scrape_url`) |
 | `GET` | `/api/admin/tasks/:id/retries` | Retry history for a task |
 | `POST` | `/api/admin/tasks/:id/retry` | Re-enqueue a failed or cancelled task |
 | `POST` | `/api/admin/tasks/:id/requeue` | Re-enqueue a pending task orphaned from Redis |
@@ -238,20 +266,36 @@ All endpoints under `/api/admin/`.
 
 ## Polling pattern (frontend)
 
+**Single task (e.g. `resize_image`):**
 ```
-POST /tasks
-  → store event_id, show "queued" state
+POST /tasks  →  store event_id
 
 poll GET /api/admin/tasks/:id every 2s
-  → show status badge (pending / processed / failed)
   → when status === "processed":
+GET /tasks/:id/result  →  show download button with result_url
+```
 
-GET /tasks/:id/result
-  → if kind === "file": show download button with result_url
-  → if kind === "delivery": show confirmation
+**Chained tasks (e.g. `scrape_url` → `generate_report`):**
+```
+POST /tasks (scrape_url + next: generate_report)  →  store scrape_event_id
+
+poll GET /api/admin/tasks/:scrape_event_id every 2s
+  → when scrape status === "processed" (raw JSON available if needed):
+
+GET /api/admin/tasks/:scrape_event_id/children
+  → find the generate_report task  →  store report_event_id
+
+poll GET /api/admin/tasks/:report_event_id every 2s
+  → when report status === "processed":
+
+GET /tasks/:report_event_id/result  →  show CSV download button with result_url
 ```
 
 The `result_url` is a presigned MinIO link valid for 24 hours. Fetch it fresh if the user needs it after expiry.
+
+> **Note on `result_url` not resolving:** set `MINIO_PUBLIC_ENDPOINT=localhost:9000` in your `.env`.
+> If this is missing, presigned URLs will contain the internal Docker hostname `minio:9000` which
+> the browser cannot reach. See `.env.example`.
 
 ---
 
@@ -387,11 +431,15 @@ MINIO_ENDPOINT=minio:9000           # internal Docker hostname (server → MinIO
 MINIO_PUBLIC_ENDPOINT=localhost:9000 # browser-accessible hostname (in presigned URLs)
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=images
+MINIO_BUCKET=task-files              # create this bucket in MinIO console (localhost:9001)
 MINIO_USE_SSL=false
 
 # OTel
 OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4318
+
+# Worker pool (optional — defaults to 3)
+# DB MaxConns is set automatically to WORKER_COUNT * 3
+WORKER_COUNT=3
 ```
 
 `MINIO_ENDPOINT` is what the Go server uses to connect to MinIO inside Docker. `MINIO_PUBLIC_ENDPOINT` is what appears in presigned URLs returned to browsers — set this to your public domain in production.
@@ -417,6 +465,8 @@ After 5 failed attempts the task is moved to the DLQ and its status is set to `f
 | Idempotency keys in Postgres | Dedup survives restarts | Extra DB read on every request |
 | Worker pool (fixed size) | Controlled concurrency, predictable DB connection load | Requires tuning for throughput |
 | Task chaining via `next` | Sequential pipelines in a single request | Chain stops on first failure |
+| `generate_report` blocked as root task | Report only makes sense over scraped content; enforced at API + backend | Users must submit via `scrape_url` |
+| `executeTask` returns extra payload | Allows tasks to forward data to the next step (e.g. `scraped_key`) without a DB round-trip | Adds a small complexity to the worker loop |
 | `parent_id` = root task ID | All chain members traceable to origin in O(1) | Slightly denormalized |
 | Exponential backoff | Protects downstream on transient failures | Slower recovery at high retry counts |
 | SQLC | Compile-time SQL validation, no ORM overhead | Must regenerate after query changes |
@@ -431,9 +481,9 @@ After 5 failed attempts the task is moved to the DLQ and its status is set to `f
 ## Production Checklist
 
 - [ ] Add authentication on `/api/admin/*` (currently open)
-- [ ] Run goose migrations automatically on startup
+- [x] Run goose migrations automatically on startup — `goose.Up` runs in `cmd/main.go` before the pool is created; app aborts if any migration fails
 - [ ] Set `MINIO_PUBLIC_ENDPOINT` to your public storage domain
 - [ ] Use Redis Streams or a dedicated queue (asynq, river) for stronger delivery guarantees
-- [ ] Tune worker pool size against DB connection pool limits
-- [ ] Monitor the DLQ — a growing DLQ means a systemic processing failure
+- [x] Tune worker pool size against DB connection pool limits — set `WORKER_COUNT` env var (default `3`); pool `MaxConns` is automatically set to `WORKER_COUNT * 3`
+- [x] Monitor the DLQ — `dlqMonitor` goroutine polls every 30s, updates `queue_depth_current{queue="dlq"}` Prometheus gauge, and logs a `WARN` when DLQ is non-empty
 - [ ] Rotate MinIO credentials and restrict bucket policy
