@@ -103,7 +103,7 @@ func run(port int) int {
 	redisClient := repository.NewRedisClient(logger)
 	defer redisClient.Close()
 
-	queue := redisqueue.NewRedisQueue(redisClient, "events_queue")
+	queue := redisqueue.NewRedisQueue(redisClient)
 	validator := service.NewTaskValidator()
 
 	storageClient, err := storage.NewMinioClient()
