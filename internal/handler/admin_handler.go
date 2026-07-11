@@ -14,22 +14,23 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/sender"
+	"github.com/isaacthajunior/mid-prod/queue"
 )
 
 type AdminHandler struct {
 	adminRepo  *repository.AdminRepository
-	queue      domain.Queue
+	queue      queue.Queue
 	workerPool domain.WorkerHealthProvider
 }
 
 func NewAdminHandler(
 	adminRepo *repository.AdminRepository,
-	queue domain.Queue,
+	q queue.Queue,
 	workerPool domain.WorkerHealthProvider,
 ) *AdminHandler {
 	return &AdminHandler{
 		adminRepo:  adminRepo,
-		queue:      queue,
+		queue:      q,
 		workerPool: workerPool,
 	}
 }

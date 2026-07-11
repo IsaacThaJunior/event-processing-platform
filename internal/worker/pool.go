@@ -32,12 +32,13 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 	"github.com/isaacthajunior/mid-prod/internal/storage"
+	"github.com/isaacthajunior/mid-prod/queue"
 )
 
 var workerTracer = otel.Tracer("worker")
 
 type WorkerPool struct {
-	queue     domain.Queue
+	queue     queue.Queue
 	repo      repository.EventRepository
 	workers   int
 	ctx       context.Context
@@ -54,7 +55,7 @@ type WorkerPool struct {
 }
 
 func NewWorkerPool(
-	queue domain.Queue,
+	q queue.Queue,
 	eventRepo repository.EventRepository,
 	workerCount int,
 	logger *slog.Logger,
@@ -63,7 +64,7 @@ func NewWorkerPool(
 ) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WorkerPool{
-		queue:     queue,
+		queue:     q,
 		repo:      eventRepo,
 		workers:   workerCount,
 		ctx:       ctx,

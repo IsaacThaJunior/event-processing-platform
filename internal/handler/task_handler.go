@@ -13,18 +13,18 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 
-	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/middleware"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/sender"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 	"github.com/isaacthajunior/mid-prod/internal/storage"
+	"github.com/isaacthajunior/mid-prod/queue"
 )
 
 var taskTracer = otel.Tracer("handler.task")
 
 type TaskHandler struct {
-	queue       domain.Queue
+	queue       queue.Queue
 	eventRepo   repository.EventRepository
 	idempotency *service.IdempotencyRepo
 	validator   *service.TaskValidator
@@ -41,9 +41,9 @@ type TaskRequest struct {
 	TraceContext string `json:"trace_context,omitempty"`
 }
 
-func NewTaskHanler(queue domain.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, validator *service.TaskValidator, storageClient *storage.Client) *TaskHandler {
+func NewTaskHanler(q queue.Queue, eventRepo repository.EventRepository, id *service.IdempotencyRepo, validator *service.TaskValidator, storageClient *storage.Client) *TaskHandler {
 	return &TaskHandler{
-		queue:       queue,
+		queue:       q,
 		eventRepo:   eventRepo,
 		idempotency: id,
 		validator:   validator,

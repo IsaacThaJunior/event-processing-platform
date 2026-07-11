@@ -24,6 +24,7 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/taskerr"
 	"github.com/isaacthajunior/mid-prod/internal/telemetry"
 	"github.com/isaacthajunior/mid-prod/internal/worker"
+	"github.com/isaacthajunior/mid-prod/queue/redisqueue"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lmittmann/tint"
@@ -100,7 +101,7 @@ func run(port int) int {
 	redisClient := repository.NewRedisClient(logger)
 	defer redisClient.Close()
 
-	queue := repository.NewRedisQueue(redisClient, "events_queue")
+	queue := redisqueue.NewRedisQueue(redisClient, "events_queue")
 	validator := service.NewTaskValidator()
 
 	storageClient, err := storage.NewMinioClient()
