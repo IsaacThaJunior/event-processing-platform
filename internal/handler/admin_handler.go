@@ -11,22 +11,22 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/isaacthajunior/mid-prod/internal/database"
-	"github.com/isaacthajunior/mid-prod/internal/domain"
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/sender"
-	"github.com/isaacthajunior/mid-prod/queue"
+	"github.com/isaacthajunior/pulse/queue"
+	"github.com/isaacthajunior/pulse/worker"
 )
 
 type AdminHandler struct {
 	adminRepo  *repository.AdminRepository
 	queue      queue.Queue
-	workerPool domain.WorkerHealthProvider
+	workerPool worker.WorkerHealthProvider
 }
 
 func NewAdminHandler(
 	adminRepo *repository.AdminRepository,
 	q queue.Queue,
-	workerPool domain.WorkerHealthProvider,
+	workerPool worker.WorkerHealthProvider,
 ) *AdminHandler {
 	return &AdminHandler{
 		adminRepo:  adminRepo,

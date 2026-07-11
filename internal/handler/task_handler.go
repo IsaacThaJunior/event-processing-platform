@@ -18,7 +18,7 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/sender"
 	"github.com/isaacthajunior/mid-prod/internal/service"
 	"github.com/isaacthajunior/mid-prod/internal/storage"
-	"github.com/isaacthajunior/mid-prod/queue"
+	"github.com/isaacthajunior/pulse/queue"
 )
 
 var taskTracer = otel.Tracer("handler.task")
@@ -36,7 +36,6 @@ type TaskRequest struct {
 	Payload   json.RawMessage `json:"payload"`
 	Priority  string          `json:"priority"`
 	ExecuteAt *time.Time      `json:"execute_at,omitempty"`
-	Next      *TaskRequest    `json:"next,omitempty"`
 	// TraceContext carries the W3C traceparent so workers continue this trace.
 	TraceContext string `json:"trace_context,omitempty"`
 }
@@ -74,7 +73,7 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Type == "generate_report" {
-		err := fmt.Errorf("generate_report cannot be submitted directly; use scrape_url with next.type=generate_report")
+		err := fmt.Errorf("generate_report cannot be submitted directly; it is created automatically after a scrape_url task completes")
 		logCtx.AddEvent("generate_report_direct_submit", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
@@ -99,21 +98,6 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
 	}
-	if req.Next != nil {
-		if req.Next.Type == "" {
-			logCtx.AddEvent("next_type_empty", "failed", fmt.Errorf("Next type is empty"))
-			sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Next type is empty"))
-			return
-		}
-		if len(req.Next.Payload) > 0 {
-			if err := h.validator.Validate(req.Next.Type, req.Next.Payload); err != nil {
-				logCtx.AddEvent("next_payload_empty", "failed", err)
-				sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
-				return
-			}
-		}
-	}
-
 	logCtx.AddEvent("passed_all_validation_checks", "success", nil)
 	logCtx.TaskType = req.Type
 	logCtx.Priority = req.Priority

@@ -22,9 +22,10 @@ import (
 	"github.com/isaacthajunior/mid-prod/internal/service"
 	"github.com/isaacthajunior/mid-prod/internal/storage"
 	"github.com/isaacthajunior/mid-prod/internal/taskerr"
+	"github.com/isaacthajunior/mid-prod/internal/taskhandlers"
 	"github.com/isaacthajunior/mid-prod/internal/telemetry"
-	"github.com/isaacthajunior/mid-prod/internal/worker"
-	"github.com/isaacthajunior/mid-prod/queue/redisqueue"
+	"github.com/isaacthajunior/pulse/queue/redisqueue"
+	"github.com/isaacthajunior/pulse/worker"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lmittmann/tint"
@@ -96,6 +97,7 @@ func run(port int) int {
 
 	queries := database.New(pool)
 	eventRepo := repository.NewEventRepository(queries)
+	eventStore := repository.NewEventStore(eventRepo)
 	idempotencyService := service.NewIdempotencyService(queries, pool)
 
 	redisClient := repository.NewRedisClient(logger)
@@ -113,12 +115,17 @@ func run(port int) int {
 		}
 	}
 
-	// Worker pool must stop before Redis/Postgres close, so defer it last (runs first).
-	workerPool := worker.NewWorkerPool(queue, eventRepo, workerCount, logger, validator, storageClient)
-	workerPool.Start()
-	defer workerPool.Stop()
+	mux := worker.NewMux()
+	mux.Handle("resize_image", taskhandlers.NewResizeImageHandler(eventRepo, storageClient))
+	mux.Handle("scrape_url", taskhandlers.NewScrapeURLHandler(eventRepo, queue, storageClient))
+	mux.Handle("generate_report", taskhandlers.NewGenerateReportHandler(eventRepo, storageClient))
 
 	metrics.Init()
+
+	// Worker pool must stop before Redis/Postgres close, so defer it last (runs first).
+	workerPool := worker.NewPool(queue, eventStore, mux, workerCount, logger, worker.WithMetrics(metrics.WorkerMetrics{}))
+	workerPool.Start()
+	defer workerPool.Stop()
 
 	taskHandler := handler.NewTaskHanler(queue, eventRepo, idempotencyService, validator, storageClient)
 	adminRepo := repository.NewAdminRepository(queries)

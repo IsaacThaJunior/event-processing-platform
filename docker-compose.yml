@@ -1,8 +1,8 @@
 services:
   app:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: go-mid-int-project/Dockerfile
     container_name: event-app
     ports:
       - "8080:8080"
@@ -12,6 +12,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4318
     volumes:
       - .:/app
+      - ../pulse:/pulse
       - ./logs:/app/logs
     depends_on:
       - otel-collector
