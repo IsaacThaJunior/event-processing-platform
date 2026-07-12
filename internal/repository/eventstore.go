@@ -26,6 +26,7 @@ var _ worker.Store = (*EventStore)(nil)
 type requestWrapper struct {
 	Payload      json.RawMessage `json:"payload"`
 	TraceContext string          `json:"trace_context"`
+	Next         json.RawMessage `json:"next,omitempty"`
 }
 
 func (s *EventStore) GetTask(ctx context.Context, id string) (worker.Task, error) {
@@ -46,6 +47,9 @@ func (s *EventStore) GetTask(ctx context.Context, id string) (worker.Task, error
 	}
 	if event.TraceID != "" {
 		meta["trace_id"] = event.TraceID
+	}
+	if len(wrapper.Next) > 0 {
+		meta["next"] = string(wrapper.Next)
 	}
 	rootTaskID := event.ID
 	if event.Parentid.Valid && event.Parentid.String != "" {

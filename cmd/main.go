@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/isaacthajunior/mid-prod/internal/chaining"
 	"github.com/isaacthajunior/mid-prod/internal/database"
 	"github.com/isaacthajunior/mid-prod/internal/handler"
 	"github.com/isaacthajunior/mid-prod/internal/metrics"
@@ -116,9 +117,9 @@ func run(port int) int {
 	}
 
 	mux := worker.NewMux()
-	mux.Handle("resize_image", taskhandlers.NewResizeImageHandler(eventRepo, storageClient))
-	mux.Handle("scrape_url", taskhandlers.NewScrapeURLHandler(eventRepo, queue, storageClient))
-	mux.Handle("generate_report", taskhandlers.NewGenerateReportHandler(eventRepo, storageClient))
+	mux.Handle("resize_image", chaining.Wrap(taskhandlers.NewResizeImageHandler(eventRepo, storageClient), eventRepo, queue))
+	mux.Handle("scrape_url", chaining.Wrap(taskhandlers.NewScrapeURLHandler(eventRepo, storageClient), eventRepo, queue))
+	mux.Handle("generate_report", chaining.Wrap(taskhandlers.NewGenerateReportHandler(eventRepo, storageClient), eventRepo, queue))
 
 	metrics.Init()
 

@@ -36,6 +36,7 @@ type TaskRequest struct {
 	Payload   json.RawMessage `json:"payload"`
 	Priority  string          `json:"priority"`
 	ExecuteAt *time.Time      `json:"execute_at,omitempty"`
+	Next      *TaskRequest    `json:"next,omitempty"`
 	// TraceContext carries the W3C traceparent so workers continue this trace.
 	TraceContext string `json:"trace_context,omitempty"`
 }
@@ -73,7 +74,7 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Type == "generate_report" {
-		err := fmt.Errorf("generate_report cannot be submitted directly; it is created automatically after a scrape_url task completes")
+		err := fmt.Errorf("generate_report cannot be submitted directly; use scrape_url with next.type=generate_report")
 		logCtx.AddEvent("generate_report_direct_submit", "failed", err)
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
@@ -98,6 +99,21 @@ func (h *TaskHandler) HandleCreateTask(w http.ResponseWriter, r *http.Request) {
 		sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
 		return
 	}
+	if req.Next != nil {
+		if req.Next.Type == "" {
+			logCtx.AddEvent("next_type_empty", "failed", fmt.Errorf("Next type is empty"))
+			sender.RespondWithError(ctx, w, http.StatusBadRequest, fmt.Errorf("Next type is empty"))
+			return
+		}
+		if len(req.Next.Payload) > 0 {
+			if err := h.validator.Validate(req.Next.Type, req.Next.Payload); err != nil {
+				logCtx.AddEvent("next_payload_empty", "failed", err)
+				sender.RespondWithError(ctx, w, http.StatusBadRequest, err)
+				return
+			}
+		}
+	}
+
 	logCtx.AddEvent("passed_all_validation_checks", "success", nil)
 	logCtx.TaskType = req.Type
 	logCtx.Priority = req.Priority
@@ -219,8 +235,8 @@ func (h *TaskHandler) HandleCancelTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /tasks/{id}/result — returns the output of a completed task.
-// File-producing tasks (resize_image, generate_report) return a presigned download URL.
-// Non-file tasks (send_email) return their delivery data directly.
+// File-producing tasks (resize_image, scrape_url, generate_report) return a
+// presigned download URL. Any other result kind is returned as-is.
 func (h *TaskHandler) HandleGetTaskResult(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := chi.URLParam(r, "id")

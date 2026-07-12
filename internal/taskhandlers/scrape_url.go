@@ -9,12 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"golang.org/x/net/html"
 
 	"github.com/isaacthajunior/mid-prod/internal/repository"
 	"github.com/isaacthajunior/mid-prod/internal/storage"
-	"github.com/isaacthajunior/pulse/queue"
 	"github.com/isaacthajunior/pulse/worker"
 )
 
@@ -28,10 +26,11 @@ type scrapedPage struct {
 }
 
 // NewScrapeURLHandler fetches a page (guarded against SSRF), extracts its
-// text content, uploads the result to storage, and — on success — chains
-// straight into a generate_report task built from the scraped data. The
-// chain is ordinary handler code: the pool has no concept of chaining.
-func NewScrapeURLHandler(eventRepo repository.EventRepository, q queue.Queue, storageClient *storage.Client) worker.HandlerFunc {
+// text content, and uploads the result to storage. Chaining into a
+// follow-up task (e.g. generate_report) is handled generically by
+// internal/chaining.Wrap based on the request's declared "next" field, not
+// by this handler.
+func NewScrapeURLHandler(eventRepo repository.EventRepository, storageClient *storage.Client) worker.HandlerFunc {
 	return func(ctx context.Context, task worker.Task) error {
 		var params struct {
 			URL string `json:"url"`
@@ -75,22 +74,6 @@ func NewScrapeURLHandler(eventRepo repository.EventRepository, q queue.Queue, st
 		resultJSON, _ := json.Marshal(map[string]string{"kind": "file", "key": key})
 		if err := eventRepo.UpdateEventResult(ctx, task.ID, string(resultJSON)); err != nil {
 			return fmt.Errorf("scrape: save result: %w", err)
-		}
-
-		// Chain: automatically create and enqueue generate_report using the
-		// data we just scraped.
-		nextID := uuid.New().String()
-		nextPayload, _ := json.Marshal(map[string]string{"scraped_key": key})
-		traceID := task.Metadata["trace_id"]
-		rootTaskID := task.Metadata["root_task_id"]
-		if rootTaskID == "" {
-			rootTaskID = task.ID
-		}
-		if err := eventRepo.SaveProcessedEvent(ctx, nextID, "generate_report", string(nextPayload), "pending", traceID, task.Priority, rootTaskID, nil); err != nil {
-			return fmt.Errorf("scrape: save next task: %w", err)
-		}
-		if err := q.EnqueueWithPriority(nextID, task.Priority); err != nil {
-			return fmt.Errorf("scrape: enqueue next task: %w", err)
 		}
 
 		return nil

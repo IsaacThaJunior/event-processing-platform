@@ -14,8 +14,16 @@ import (
 
 // NewGenerateReportHandler downloads the scraped data referenced by
 // scraped_key, renders it as CSV, and uploads the report. Only reachable
-// via the scrape_url → generate_report chain; the HTTP API rejects direct
-// submission (see task_handler.go).
+// via a chain (the HTTP API rejects direct submission — see task_handler.go).
+//
+// The caller declaring `next: {type: generate_report}` can't know
+// scraped_key in advance — it's only known once the parent task (e.g.
+// scrape_url) finishes running and uploads its result. So if the payload
+// doesn't carry scraped_key explicitly, this handler falls back to reading
+// its parent task's stored file result. That also means generate_report
+// works chained after any file-producing task that stores a
+// {"kind":"file","key":...} result in the same shape scrape_url uses, not
+// just scrape_url specifically.
 func NewGenerateReportHandler(eventRepo repository.EventRepository, storageClient *storage.Client) worker.HandlerFunc {
 	return func(ctx context.Context, task worker.Task) error {
 		var params struct {
@@ -24,14 +32,20 @@ func NewGenerateReportHandler(eventRepo repository.EventRepository, storageClien
 		if err := json.Unmarshal(task.Payload, &params); err != nil {
 			return fmt.Errorf("report: parse params: %w", err)
 		}
-		if params.ScrapedKey == "" {
-			return fmt.Errorf("report: scraped_key is required; submit scrape_url with next.type=generate_report")
-		}
 		if storageClient == nil {
 			return fmt.Errorf("report: storage client not configured")
 		}
 
-		rc, err := storageClient.Download(ctx, params.ScrapedKey)
+		scrapedKey := params.ScrapedKey
+		if scrapedKey == "" {
+			key, err := parentFileResultKey(ctx, eventRepo, task.Metadata["root_task_id"])
+			if err != nil {
+				return fmt.Errorf("report: scraped_key is required; submit scrape_url (or another file-producing task) with next.type=generate_report: %w", err)
+			}
+			scrapedKey = key
+		}
+
+		rc, err := storageClient.Download(ctx, scrapedKey)
 		if err != nil {
 			return fmt.Errorf("report: download scraped data: %w", err)
 		}
@@ -74,4 +88,30 @@ func NewGenerateReportHandler(eventRepo repository.EventRepository, storageClien
 
 		return nil
 	}
+}
+
+// parentFileResultKey fetches parentID's event and extracts the storage
+// key from its stored {"kind":"file","key":...} result.
+func parentFileResultKey(ctx context.Context, eventRepo repository.EventRepository, parentID string) (string, error) {
+	if parentID == "" {
+		return "", fmt.Errorf("no parent task")
+	}
+	parent, err := eventRepo.GetEventByID(ctx, parentID)
+	if err != nil {
+		return "", fmt.Errorf("fetch parent task: %w", err)
+	}
+	if !parent.Result.Valid || parent.Result.String == "" {
+		return "", fmt.Errorf("parent task %s has no result", parentID)
+	}
+	var result struct {
+		Kind string `json:"kind"`
+		Key  string `json:"key"`
+	}
+	if err := json.Unmarshal([]byte(parent.Result.String), &result); err != nil {
+		return "", fmt.Errorf("parse parent task result: %w", err)
+	}
+	if result.Kind != "file" || result.Key == "" {
+		return "", fmt.Errorf("parent task %s has no usable file result", parentID)
+	}
+	return result.Key, nil
 }

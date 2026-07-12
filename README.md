@@ -1,6 +1,8 @@
 # Task Queue System (Go + Redis + PostgreSQL)
 
-A resilient background task processing system built in Go. Tasks are submitted via HTTP, queued in Redis by priority, processed by a worker pool with retries, scheduling, chaining, and cancellation. File-producing tasks (image resizing, report generation) upload their output to MinIO and return a presigned download URL.
+A resilient background task processing system built in Go. Tasks are submitted via HTTP, queued in Redis by priority, processed by a worker pool with retries, scheduling, and cancellation. File-producing tasks (image resizing, report generation) upload their output to MinIO and return a presigned download URL.
+
+The generic queue + worker engine that used to live in this repo has been extracted into a separate library, **pulse** (module `github.com/isaacthajunior/pulse`) — a backend-agnostic priority queue and worker pool with a pluggable handler registry. This repo is now `pulse`'s reference implementation: it owns the HTTP API, Postgres/MinIO wiring, and the three concrete task handlers (`resize_image`, `scrape_url`, `generate_report`), and imports `pulse` for everything generic (queueing, retries, scheduling, DLQ). `pulse` isn't published yet, so `go.mod` points at it via a local `replace` directive — see [Project Structure](#project-structure).
 
 ---
 
@@ -32,26 +34,29 @@ HTTP Client
                │ BRPOP (blocking dequeue)
                ▼
 ┌─────────────────────────────────────────┐
-│             Worker Pool (N workers)     │
+│   pulse worker.Pool (N workers)         │ ← from github.com/isaacthajunior/pulse
 │  ┌─────────────────────────────────┐    │
-│  │  fetch event from postgres      │    │
+│  │  fetch task via worker.Store    │    │ → internal/repository/eventstore.go
 │  │  check cancelled → skip         │    │
-│  │  execute task handler           │    │
-│  │  upload output → MinIO          │    │
-│  │  save result key → postgres     │    │
-│  │  on success → enqueue next task │    │
-│  │  on failure → retry w/ backoff  │    │
+│  │  dispatch to registered handler │    │ → internal/taskhandlers/*.go,
+│  │  on failure → retry w/ backoff  │    │   wrapped by internal/chaining.Wrap
 │  │  max retries → DLQ              │    │
 │  └─────────────────────────────────┘    │
+│  handler: uploads to MinIO, saves       │
+│  result key to postgres. chaining.Wrap  │
+│  (outside the handler) then enqueues    │
+│  the task's declared "next" step, if    │
+│  any — the pool itself never knows      │
+│  chaining exists                        │
 └──────────┬───────────────┬──────────────┘
            │               │
            ▼               ▼
 ┌──────────────────┐  ┌────────────────────┐
 │   PostgreSQL     │  │   MinIO (:9000)    │
-│  events          │  │  images/resized/   │
-│  delivery_logs   │  │  reports/          │
-│  idempotency_keys│  └────────────────────┘
-└──────────────────┘
+│  events          │  │  resized/          │
+│  delivery_logs   │  │  scraped/          │
+│  idempotency_keys│  │  reports/          │
+└──────────────────┘  └────────────────────┘
 ```
 
 ---
@@ -62,7 +67,7 @@ HTTP Client
 |---|---|
 | Priority queues | `high`, `medium`, `low` — workers drain high before low |
 | Scheduled tasks | `execute_at` defers a task to a future time |
-| Task chaining | `next` field runs tasks sequentially after each succeeds |
+| Task chaining | `next` field declares a follow-up task, recursively, for **any** task type — implemented generically in `internal/chaining.Wrap`, applied to every handler |
 | Task cancellation | `DELETE /tasks/:id` cancels any pending task |
 | Idempotency | Duplicate requests with the same type/payload/priority are rejected |
 | Retry + backoff | Up to 5 attempts: 1s → 2s → 4s → 8s → 16s |
@@ -71,7 +76,7 @@ HTTP Client
 | File storage | File-output tasks upload to MinIO; result retrieved via presigned URL |
 | SSRF protection | Image/URL downloads go through a guard that blocks private IP ranges |
 | Typed task results | Results stored as `{"kind":"file",...}` or `{"kind":"delivery",...}` |
-| Structured logging | Single log line per task with step-level event trail |
+| Structured logging | HTTP request path logs a step-level event trail (`internal/middleware`); task processing logs one structured line per outcome (processed/retry/failed) from `pulse`'s worker.Pool |
 | Distributed tracing | OTel spans propagated from HTTP handler through worker |
 | Prometheus metrics | Tasks processed, failed, retried, duration — exposed at `/metrics` |
 | Graceful shutdown | SIGINT/SIGTERM drains in-flight requests and running tasks before exit |
@@ -102,7 +107,7 @@ Downloads an image from a URL, resizes it, and uploads the result to MinIO.
 
 Fetches a URL, parses the HTML, and stores a structured JSON snapshot (title, headings, paragraphs, links) in MinIO under `scraped/{task_id}.json`. The result is accessible as a presigned download URL.
 
-Can be submitted standalone or with `next.type=generate_report` to automatically produce a CSV report from the scraped content.
+Can be submitted standalone, or with `next.type=generate_report` to automatically produce a CSV report from the scraped content once scraping succeeds.
 
 | Field | Required |
 |---|---|
@@ -110,9 +115,9 @@ Can be submitted standalone or with `next.type=generate_report` to automatically
 
 ### `generate_report`
 
-**Cannot be submitted directly.** Must be chained as the `next` step after `scrape_url`. The system automatically injects the scraped data key into its payload after scraping completes.
+**Cannot be submitted directly** — rejected at the API layer (it needs a predecessor's scraped data to run against).
 
-Reads the scraped JSON from MinIO, formats the content as a CSV (URL, title, headings, paragraphs, links), and uploads it to MinIO under `reports/{task_id}.csv`. The result is accessible as a presigned download URL.
+Reads scraped JSON from MinIO and formats it as a CSV (URL, title, headings, paragraphs, links), uploaded to MinIO under `reports/{task_id}.csv`. Its payload takes an optional `scraped_key`; if omitted, it looks up its parent task's stored `{"kind":"file","key":...}` result instead. That means it isn't hardcoded to only follow `scrape_url` — any task type that stores a file result in that shape and chains into `generate_report` via `next` will work, without `generate_report` needing to know anything about that task type.
 
 ---
 
@@ -178,7 +183,7 @@ With scheduling:
 }
 ```
 
-**Chaining** — `next` is recursive. Tasks in the chain share the same `parent_id` and run sequentially. A failure stops the chain at that step.
+**Chaining** — `next` is recursive (a `next` can have its own `next`) and works for any task type, not just `scrape_url`/`generate_report` — see `internal/chaining.Wrap` in [Project Structure](#project-structure). Chained tasks share the same `parent_id` (see `GET /api/admin/tasks/:id/children`) and `trace_id` as the task that spawned them. A failed task never enqueues its `next` step.
 
 **Responses:**
 
@@ -209,27 +214,18 @@ GET /tasks/:id/result
 
 Call this after the task status is `processed`. Returns different shapes depending on the task type.
 
-**File-output tasks** (e.g. `resize_image`, `generate_report`):
+**File-output tasks** — all three task types (`resize_image`, `scrape_url`, `generate_report`) currently produce this shape:
 
 ```json
 {
   "event_id": "abc-123",
   "kind": "file",
-  "result_url": "http://localhost:9000/images/resized/abc-123.jpeg?X-Amz-...",
+  "result_url": "http://localhost:9000/task-files/resized/abc-123.jpeg?X-Amz-...",
   "expires_in": "24h"
 }
 ```
 
-**Delivery tasks** (e.g. `send_email`):
-
-```json
-{
-  "event_id": "abc-123",
-  "kind": "delivery",
-  "recipient": "user@example.com",
-  "message_id": "msg_xyz"
-}
-```
+**Any other result `kind`** is returned as-is, with `event_id` merged in — this endpoint doesn't hardcode a fixed set of result shapes, so a future non-file-producing task type isn't blocked by it.
 
 **Not yet processed** (returns `202`):
 
@@ -242,6 +238,10 @@ Call this after the task status is `processed`. Returns different shapes dependi
 ```
 
 ---
+
+### Other endpoints
+
+`GET /health` — liveness check, returns `200` with a plain-text body. `GET /metrics` — Prometheus scrape endpoint.
 
 ### Admin API
 
@@ -277,7 +277,7 @@ GET /tasks/:id/result  →  show download button with result_url
 
 **Chained tasks (e.g. `scrape_url` → `generate_report`):**
 ```
-POST /tasks (scrape_url + next: generate_report)  →  store scrape_event_id
+POST /tasks (scrape_url)  →  store scrape_event_id
 
 poll GET /api/admin/tasks/:scrape_event_id every 2s
   → when scrape status === "processed" (raw JSON available if needed):
@@ -304,33 +304,37 @@ The `result_url` is a presigned MinIO link valid for 24 hours. Fetch it fresh if
 ```
 .
 ├── cmd/
-│   ├── main.go              # wires everything, graceful shutdown
+│   ├── main.go              # wires everything: registers taskhandlers on a
+│   │                        # pulse worker.Mux, builds pulse.NewPool, graceful shutdown
 │   └── server.go            # chi router, middleware, routes
 ├── internal/
 │   ├── handler/
 │   │   ├── task_handler.go  # create, cancel, get result
-│   │   ├── admin_handler.go # admin endpoints
-│   │   └── task_sanitizer.go
-│   ├── worker/
-│   │   ├── pool.go          # worker pool, retry, task routing
+│   │   └── admin_handler.go # admin endpoints
+│   ├── taskhandlers/        # the actual task logic — registered as pulse worker.HandlerFuncs
+│   │   ├── resize_image.go
+│   │   ├── scrape_url.go
+│   │   ├── generate_report.go  # falls back to its parent's stored file result if
+│   │   │                       # scraped_key isn't in its own payload
 │   │   └── ssrf.go          # SSRF guard for URL downloads
+│   ├── chaining/
+│   │   └── chaining.go      # generic "next" chaining, wraps any worker.HandlerFunc
 │   ├── storage/
 │   │   └── minio.go         # MinIO client, upload, presigned URLs
 │   ├── repository/
 │   │   ├── event_repository.go
 │   │   ├── admin_repository.go
-│   │   └── redis_queue.go
+│   │   ├── eventstore.go    # adapts EventRepository to pulse's worker.Store interface
+│   │   └── redis_client.go  # builds the *redis.Client passed to pulse's redisqueue.NewRedisQueue
 │   ├── service/
 │   │   ├── idempotency.go
 │   │   └── task_validator.go
-│   ├── domain/
-│   │   ├── queue.go         # Queue interface
-│   │   └── worker.go        # WorkerHealthProvider interface
 │   ├── middleware/
 │   │   ├── request_logger.go  # structured per-request logging
 │   │   └── trace.go           # OTel trace ID injection
 │   ├── metrics/
-│   │   └── metrics.go
+│   │   ├── metrics.go
+│   │   └── worker_metrics.go  # adapts Prometheus vars to pulse's worker.Metrics interface
 │   ├── telemetry/
 │   │   └── tracer.go
 │   ├── sender/
@@ -339,10 +343,15 @@ The `result_url` is a presigned MinIO link valid for 24 hours. Fetch it fresh if
 ├── sql/
 │   ├── schema/              # goose migrations
 │   └── queries/             # sqlc query definitions
-├── docker-compose.yml
+├── docker-compose.yml       # build context is the parent dir (../), so the sibling
+│                            # pulse/ repo is visible for the local go.mod replace
 ├── Dockerfile
-└── go.mod
+└── go.mod                   # require + replace github.com/isaacthajunior/pulse => ../pulse
 ```
+
+The queue interface (`queue.Queue`), its Redis implementation (`redisqueue`), and the
+generic worker engine (`worker.Pool`, `worker.Mux`, `worker.Store`) all live in the
+separate **pulse** repo, imported via `go.mod`. Nothing in this app defines them anymore.
 
 ---
 
@@ -365,6 +374,18 @@ Logs from the app are written to `logs/tasks.log` (JSON) and scraped by Promtail
 ---
 
 ## How to Run
+
+**0. Get the `pulse` library alongside this repo**
+
+This app depends on `github.com/isaacthajunior/pulse` (queue + worker engine) via a local `go.mod` `replace` directive pointing at `../pulse`, since it isn't published yet. Clone/copy it as a sibling directory:
+
+```
+Go-projects/
+├── go-mid-int-project/   # this repo
+└── pulse/                # required sibling
+```
+
+Both `go build` and the Docker build (`docker-compose.yml`'s build context is the parent directory) expect `pulse` to exist there.
 
 **1. Copy env and start everything**
 
@@ -433,6 +454,7 @@ MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET=task-files              # create this bucket in MinIO console (localhost:9001)
 MINIO_USE_SSL=false
+MINIO_REGION=us-east-1               # MinIO default; set explicitly to avoid GetBucketLocation calls
 
 # OTel
 OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4318
@@ -464,9 +486,9 @@ After 5 failed attempts the task is moved to the DLQ and its status is set to `f
 | Redis lists + sorted set | Simple priority queue with scheduled task support | No built-in durability; at-least-once delivery |
 | Idempotency keys in Postgres | Dedup survives restarts | Extra DB read on every request |
 | Worker pool (fixed size) | Controlled concurrency, predictable DB connection load | Requires tuning for throughput |
-| Task chaining via `next` | Sequential pipelines in a single request | Chain stops on first failure |
-| `generate_report` blocked as root task | Report only makes sense over scraped content; enforced at API + backend | Users must submit via `scrape_url` |
-| `executeTask` returns extra payload | Allows tasks to forward data to the next step (e.g. `scraped_key`) without a DB round-trip | Adds a small complexity to the worker loop |
+| Chaining as a generic handler wrapper (`internal/chaining.Wrap`) | Request-declared, recursive `next` for any task type, while keeping `pulse`'s worker.Pool completely unaware chaining exists — the wrapper sits between the pool and every handler | An extra indirection to understand when reading `cmd/main.go`'s `mux.Handle` calls |
+| `generate_report` blocked as a directly-submitted task | Needs a predecessor's scraped/file data to run against; enforced at the API layer | Users must reach it via `next` on another task |
+| `generate_report` falls back to its parent's stored result | Lets it chain after any file-producing task, not just `scrape_url`, without the caller needing to know a storage key generated at runtime | Depends on the parent having stored a `{"kind":"file","key":...}` result |
 | `parent_id` = root task ID | All chain members traceable to origin in O(1) | Slightly denormalized |
 | Exponential backoff | Protects downstream on transient failures | Slower recovery at high retry counts |
 | SQLC | Compile-time SQL validation, no ORM overhead | Must regenerate after query changes |
