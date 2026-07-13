@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/disintegration/imaging v1.6.2
+	github.com/isaacthajunior/pulse v0.1.0
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/minio/minio-go/v7 v7.1.0
 	github.com/pkg/errors v0.9.1
@@ -98,7 +99,6 @@ require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-chi/cors v1.2.2
 	github.com/google/uuid v1.6.0
-	github.com/isaacthajunior/pulse v0.0.0-00010101000000-000000000000
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
@@ -113,5 +113,3 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
-
-replace github.com/isaacthajunior/pulse => ../pulse

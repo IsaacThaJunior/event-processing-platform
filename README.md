@@ -2,7 +2,7 @@
 
 A resilient background task processing system built in Go. Tasks are submitted via HTTP, queued in Redis by priority, processed by a worker pool with retries, scheduling, and cancellation. File-producing tasks (image resizing, report generation) upload their output to MinIO and return a presigned download URL.
 
-The generic queue + worker engine that used to live in this repo has been extracted into a separate library, **pulse** (module `github.com/isaacthajunior/pulse`) — a backend-agnostic priority queue and worker pool with a pluggable handler registry. This repo is now `pulse`'s reference implementation: it owns the HTTP API, Postgres/MinIO wiring, and the three concrete task handlers (`resize_image`, `scrape_url`, `generate_report`), and imports `pulse` for everything generic (queueing, retries, scheduling, DLQ). `pulse` isn't published yet, so `go.mod` points at it via a local `replace` directive — see [Project Structure](#project-structure).
+The generic queue + worker engine that used to live in this repo has been extracted into a separate library, **[pulse](https://github.com/IsaacThaJunior/pulse)** (module `github.com/isaacthajunior/pulse`, `v0.1.0`) — a backend-agnostic priority queue and worker pool with a pluggable handler registry. This repo is now `pulse`'s reference implementation: it owns the HTTP API, Postgres/MinIO wiring, and the three concrete task handlers (`resize_image`, `scrape_url`, `generate_report`), and imports `pulse` as an ordinary published dependency (`go get github.com/isaacthajunior/pulse`) for everything generic (queueing, retries, scheduling, DLQ).
 
 ---
 
@@ -343,15 +343,15 @@ The `result_url` is a presigned MinIO link valid for 24 hours. Fetch it fresh if
 ├── sql/
 │   ├── schema/              # goose migrations
 │   └── queries/             # sqlc query definitions
-├── docker-compose.yml       # build context is the parent dir (../), so the sibling
-│                            # pulse/ repo is visible for the local go.mod replace
+├── docker-compose.yml
 ├── Dockerfile
-└── go.mod                   # require + replace github.com/isaacthajunior/pulse => ../pulse
+└── go.mod                   # require github.com/isaacthajunior/pulse v0.1.0
 ```
 
 The queue interface (`queue.Queue`), its Redis implementation (`redisqueue`), and the
 generic worker engine (`worker.Pool`, `worker.Mux`, `worker.Store`) all live in the
-separate **pulse** repo, imported via `go.mod`. Nothing in this app defines them anymore.
+separate **[pulse](https://github.com/IsaacThaJunior/pulse)** repo, pulled in as an
+ordinary published Go module. Nothing in this app defines them anymore.
 
 ---
 
@@ -374,18 +374,6 @@ Logs from the app are written to `logs/tasks.log` (JSON) and scraped by Promtail
 ---
 
 ## How to Run
-
-**0. Get the `pulse` library alongside this repo**
-
-This app depends on `github.com/isaacthajunior/pulse` (queue + worker engine) via a local `go.mod` `replace` directive pointing at `../pulse`, since it isn't published yet. Clone/copy it as a sibling directory:
-
-```
-Go-projects/
-├── go-mid-int-project/   # this repo
-└── pulse/                # required sibling
-```
-
-Both `go build` and the Docker build (`docker-compose.yml`'s build context is the parent directory) expect `pulse` to exist there.
 
 **1. Copy env and start everything**
 
